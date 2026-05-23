@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # ============================================================
+  # PostgreSQL Database
+  # ============================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: population-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: population_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/001_create_tables.sql:/docker-entrypoint-initdb.d/001_create_tables.sql
+      - ./scripts/002_seed_data.sql:/docker-entrypoint-initdb.d/002_seed_data.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - population-net
+
+  # ============================================================
+  # Population Service API
+  # ============================================================
+  api:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    container_name: population-api
+    environment:
+      APP_PORT: 8080
+      APP_ENV: development
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres123
+      DB_NAME: population_db
+      DB_SSLMODE: disable
+      # Generate key: openssl rand -base64 32
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - population-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  population-net:
+    driver: bridge

@@ -1,0 +1,154 @@
+{
+  "info": {
+    "name": "Population Service API",
+    "description": "API quản lý dân số - Postman Collection\n\n## Lưu ý về Mã hóa\nCác trường `national_id`, `phone_number`, `email`, `permanent_address` trong response là **ciphertext AES-256-GCM**.\nFrontend cần decrypt bằng shared key.\n\n## Decrypt bằng JavaScript (browser console)\n```js\nasync function decryptField(base64Ciphertext, base64Key) {\n  const keyBytes = Uint8Array.from(atob(base64Key), c => c.charCodeAt(0));\n  const cipherBytes = Uint8Array.from(atob(base64Ciphertext), c => c.charCodeAt(0));\n  const iv = cipherBytes.slice(0, 12);\n  const data = cipherBytes.slice(12);\n  const cryptoKey = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['decrypt']);\n  const decrypted = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, cryptoKey, data);\n  return new TextDecoder().decode(decrypted);\n}\n```",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080/api/v1", "type": "string" },
+    { "key": "citizen_id", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "url": "http://localhost:8080/health"
+      }
+    },
+    {
+      "name": "Citizens",
+      "item": [
+        {
+          "name": "Create Citizen",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var json = pm.response.json();",
+                  "if (json.data && json.data.id) {",
+                  "  pm.collectionVariables.set('citizen_id', json.data.id);",
+                  "  console.log('Saved citizen_id:', json.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/citizens",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"full_name\": \"Nguyễn Văn Test\",\n  \"date_of_birth\": \"1995-06-15\",\n  \"gender\": \"male\",\n  \"national_id\": \"079000999888\",\n  \"phone_number\": \"0901000999\",\n  \"email\": \"test@example.com\",\n  \"permanent_address\": \"123 Đường Test, Quận 1, TP.HCM\",\n  \"religion\": \"Không\",\n  \"ethnicity\": \"Kinh\",\n  \"marital_status\": \"single\",\n  \"province_code\": \"79\",\n  \"district_code\": \"760\",\n  \"ward_code\": \"26734\",\n  \"is_alive\": true\n}"
+            }
+          }
+        },
+        {
+          "name": "Get Citizen by ID",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/citizens/{{citizen_id}}"
+          }
+        },
+        {
+          "name": "List Citizens",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/citizens?page=1&page_size=10",
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "page_size", "value": "10" },
+                { "key": "province_code", "value": "", "disabled": true },
+                { "key": "gender", "value": "male", "disabled": true },
+                { "key": "search", "value": "Nguyễn", "disabled": true },
+                { "key": "is_alive", "value": "true", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List Citizens - Filter by Province",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/citizens?province_code=01&page=1&page_size=20",
+              "query": [
+                { "key": "province_code", "value": "01" },
+                { "key": "page", "value": "1" },
+                { "key": "page_size", "value": "20" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update Citizen (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{base_url}}/citizens/{{citizen_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"marital_status\": \"married\",\n  \"phone_number\": \"0901999111\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Delete Citizen (Soft Delete)",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/citizens/{{citizen_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Population Stats",
+      "item": [
+        {
+          "name": "Get All Province Stats",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/population/stats"
+          }
+        },
+        {
+          "name": "Get Stats - Hà Nội (01)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/population/stats/01"
+          }
+        },
+        {
+          "name": "Get Stats - TP.HCM (79)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/population/stats/79"
+          }
+        },
+        {
+          "name": "Get Stats - Đà Nẵng (48)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/population/stats/48"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Encryption",
+      "item": [
+        {
+          "name": "Get Encryption Metadata",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/encryption/meta",
+            "description": "Returns encryption algorithm info and list of encrypted fields"
+          }
+        }
+      ]
+    }
+  ]
+}
