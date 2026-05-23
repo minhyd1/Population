@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 🏛️ Population Service
 
 API quản lý dân số Việt Nam viết bằng Golang, PostgreSQL, theo chuẩn microservice.
@@ -194,3 +195,6 @@ go test ./pkg/crypto/... -v
 - **Pagination**: Mọi endpoint danh sách đều có pagination
 - **Encryption**: AES-256-GCM, IV ngẫu nhiên mỗi lần → cùng plaintext cho ciphertext khác nhau
 - **Key rotation**: Thêm `key_version` vào header `X-Encryption-Key-Version` để support rotate key
+=======
+# Population
+>>>>>>> a2ae5c46ecb7eb1b29e98ad58b9d2db1b2ef5b98
