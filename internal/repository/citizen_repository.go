@@ -7,8 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jmoiron/sqlx"
 	"population-service/internal/model"
+
+	"github.com/jmoiron/sqlx"
 )
 
 // CitizenRepository định nghĩa interface cho citizen repository
@@ -243,17 +244,29 @@ func (r *citizenRepo) GetPopulationStatByProvince(ctx context.Context, provinceC
 }
 
 func (r *citizenRepo) ExistsByNationalID(ctx context.Context, nationalID string, excludeID string) (bool, error) {
-	// Note: national_id is stored encrypted in DB
-	// Exact-match search on encrypted field requires fetching all and comparing
-	// For production: use deterministic encryption (HMAC) for searchable fields
-	// Here we demonstrate the approach with a comment
-	query := `
-		SELECT EXISTS(
-			SELECT 1 FROM citizens
-			WHERE national_id = $1 AND id != $2 AND deleted_at IS NULL
-		)
-	`
+	var query string
 	var exists bool
-	err := r.db.QueryRowContext(ctx, query, nationalID, excludeID).Scan(&exists)
+	var err error
+
+	if excludeID == "" {
+		// Tạo mới: không cần loại trừ bản ghi nào
+		query = `
+			SELECT EXISTS(
+				SELECT 1 FROM citizens
+				WHERE national_id = $1 AND deleted_at IS NULL
+			)
+		`
+		err = r.db.QueryRowContext(ctx, query, nationalID).Scan(&exists)
+	} else {
+		// Cập nhật: loại trừ bản ghi đang sửa
+		query = `
+			SELECT EXISTS(
+				SELECT 1 FROM citizens
+				WHERE national_id = $1 AND id != $2 AND deleted_at IS NULL
+			)
+		`
+		err = r.db.QueryRowContext(ctx, query, nationalID, excludeID).Scan(&exists)
+	}
+
 	return exists, err
 }

@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
 	"population-service/internal/model"
 	"population-service/internal/repository"
 	"population-service/pkg/crypto"
+
+	"github.com/google/uuid"
 )
 
 // CitizenService định nghĩa business logic
@@ -53,8 +54,19 @@ func (s *citizenService) Create(ctx context.Context, req model.CreateCitizenRequ
 		return nil, fmt.Errorf("invalid date_of_birth format, expected YYYY-MM-DD")
 	}
 
+	encNationalIDCheck, err := s.encryptor.EncryptDeterministic(req.NationalID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt national_id: %w", err)
+	}
+	exists, err := s.citizenRepo.ExistsByNationalID(ctx, encNationalIDCheck, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to check duplicate national_id: %w", err)
+	}
+	if exists {
+		return nil, fmt.Errorf("national_id already exists")
+	}
 	// Mã hóa các trường nhạy cảm để lưu DB
-	encNationalID, err := s.encryptor.Encrypt(req.NationalID)
+	encNationalID, err := s.encryptor.EncryptDeterministic(req.NationalID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt national_id: %w", err)
 	}
@@ -132,7 +144,7 @@ func (s *citizenService) Update(ctx context.Context, id string, req model.Update
 		citizen.Gender = *req.Gender
 	}
 	if req.NationalID != nil {
-		enc, err := s.encryptor.Encrypt(*req.NationalID)
+		enc, err := s.encryptor.EncryptDeterministic(*req.NationalID)
 		if err != nil {
 			return nil, err
 		}

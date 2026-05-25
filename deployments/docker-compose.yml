@@ -1,5 +1,4 @@
 version: '3.8'
-
 services:
   # ============================================================
   # PostgreSQL Database
@@ -15,8 +14,12 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./scripts/001_create_tables.sql:/docker-entrypoint-initdb.d/001_create_tables.sql
-      - ./scripts/002_seed_data.sql:/docker-entrypoint-initdb.d/002_seed_data.sql
+      - type: bind
+        source: ../scripts/001_create_tables.sql
+        target: /docker-entrypoint-initdb.d/01_create_tables.sql
+      - type: bind
+        source: ../scripts/002_seed_data.sql
+        target: /docker-entrypoint-initdb.d/02_seed_data.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -24,7 +27,6 @@ services:
       retries: 5
     networks:
       - population-net
-
   # ============================================================
   # Population Service API
   # ============================================================
@@ -42,7 +44,6 @@ services:
       DB_PASSWORD: postgres123
       DB_NAME: population_db
       DB_SSLMODE: disable
-      # Generate key: openssl rand -base64 32
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=}
     ports:
       - "8080:8080"

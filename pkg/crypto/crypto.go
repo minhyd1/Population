@@ -21,6 +21,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"io"
@@ -138,6 +139,28 @@ func GenerateKey() (string, error) {
 	return base64.StdEncoding.EncodeToString(key), nil
 }
 
+// EncryptDeterministic mã hóa với IV cố định (không ngẫu nhiên).
+// Cùng plaintext + cùng key → luôn cho cùng ciphertext.
+// Dùng riêng cho national_id để DB có thể kiểm tra UNIQUE.
+func (e *Encryptor) EncryptDeterministic(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", nil
+	}
+	block, err := aes.NewCipher(e.key)
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	// IV cố định 12 bytes, derive từ key → cùng input luôn cho cùng output
+	h := sha256.Sum256(e.key)
+	iv := h[:gcm.NonceSize()]
+	ciphertext := gcm.Seal(iv, iv, []byte(plaintext), nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
 // SensitiveFields danh sách các trường nhạy cảm được mã hóa
 var SensitiveFields = []string{
 	"national_id",
@@ -145,3 +168,5 @@ var SensitiveFields = []string{
 	"email",
 	"permanent_address",
 }
+
+

@@ -1,4 +1,3 @@
-SET client_encoding = 'UTF8'; 
 -- ============================================================
 -- Migration: 002_seed_data.sql
 -- Dữ liệu mẫu - Provinces + Districts + Wards + Citizens

@@ -1,4 +1,3 @@
-SET client_encoding = 'UTF8'; 
 -- ============================================================
 -- 003_seed_citizens.sql - 30 công dân mẫu (đã mã hóa AES-256-GCM)
 -- ENCRYPTION_KEY: YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=
