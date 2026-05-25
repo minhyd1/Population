@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS citizens (
     gender            VARCHAR(10)  NOT NULL CHECK (gender IN ('male', 'female', 'other')),
 
     -- ⚠️  ENCRYPTED FIELDS (AES-256-GCM, stored as base64)
-    national_id       TEXT         NOT NULL UNIQUE,       -- CCCD 12 số / CMND 9 số (encrypted)
+    national_id       TEXT         NOT NULL,       -- CCCD 12 số / CMND 9 số (encrypted)
     phone_number      TEXT,                         -- SĐT (encrypted)
     email             TEXT,                         -- Email (encrypted)
     permanent_address TEXT         NOT NULL,        -- Địa chỉ thường trú (encrypted)
