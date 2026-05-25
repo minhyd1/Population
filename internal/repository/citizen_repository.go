@@ -176,7 +176,7 @@ func (r *citizenRepo) List(ctx context.Context, filter model.ListCitizenFilter) 
 	query := fmt.Sprintf(`
 		SELECT * FROM citizens
 		WHERE %s
-		ORDER BY created_at DESC
+		ORDER BY created_at ASC
 		LIMIT $%d OFFSET $%d
 	`, where, argIdx, argIdx+1)
 	args = append(args, filter.PageSize, offset)
@@ -208,7 +208,7 @@ func (r *citizenRepo) GetPopulationStatsByProvince(ctx context.Context) ([]*mode
 		LEFT JOIN provinces p ON p.code = c.province_code
 		WHERE c.deleted_at IS NULL
 		GROUP BY c.province_code, p.name
-		ORDER BY total DESC
+		ORDER BY total ASC
 	`
 	var stats []*model.PopulationStat
 	err := r.db.SelectContext(ctx, &stats, query)
