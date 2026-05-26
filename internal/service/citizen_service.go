@@ -54,8 +54,21 @@ func (s *citizenService) Create(ctx context.Context, req model.CreateCitizenRequ
 		return nil, fmt.Errorf("invalid date_of_birth format, expected YYYY-MM-DD")
 	}
 
-	// Mã hóa các trường nhạy cảm để lưu DB
-	encNationalID, err := s.encryptor.Encrypt(req.NationalID)
+	// Kiểm tra trùng CCCD trước khi lưu
+	encNationalIDCheck, err := s.encryptor.EncryptDeterministic(req.NationalID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt national_id: %w", err)
+	}
+	exists, err := s.citizenRepo.ExistsByNationalID(ctx, encNationalIDCheck, "")
+	if err != nil {
+		return nil, fmt.Errorf("failed to check duplicate national_id: %w", err)
+	}
+	if exists {
+		return nil, fmt.Errorf("national_id already exists")
+	}
+
+	// Mã hóa deterministic để lưu DB (để sau này check trùng được)
+	encNationalID, err := s.encryptor.EncryptDeterministic(req.NationalID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt national_id: %w", err)
 	}

@@ -2,12 +2,13 @@ package handler
 
 import (
 	"net/http"
-	"strings"
-	"github.com/gin-gonic/gin"
 	"population-service/internal/model"
 	"population-service/internal/service"
 	"population-service/pkg/crypto"
 	"population-service/pkg/response"
+	"strings"
+
+	"github.com/gin-gonic/gin"
 )
 
 type CitizenHandler struct {
@@ -28,16 +29,16 @@ func (h *CitizenHandler) Create(c *gin.Context) {
 	result, err := h.svc.Create(c.Request.Context(), req)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") || strings.Contains(err.Error(), "duplicate") {
-    		response.Conflict(c, "Số CCCD/CMND đã tồn tại trong hệ thống")
-   	 		return
+			response.Conflict(c, "Số CCCD/CMND đã tồn tại trong hệ thống")
+			return
 		}
 		if strings.Contains(err.Error(), "national_id already exists") {
 			response.Conflict(c, err.Error()) // trả về lỗi chi tiết để debug
 			return
 		}
-    response.InternalError(c, err.Error())
-    return
-}
+		response.InternalError(c, err.Error())
+		return
+	}
 	response.Created(c, result)
 }
 
