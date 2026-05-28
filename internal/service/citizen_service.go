@@ -146,11 +146,19 @@ func (s *citizenService) Update(ctx context.Context, id string, req model.Update
 		citizen.Gender = *req.Gender
 	}
 	if req.NationalID != nil {
-		enc, err := s.encryptor.Encrypt(*req.NationalID)
+    // Kiểm tra CCCD mới có trùng với người khác không (loại trừ chính người này)
+		encCheck, err := s.encryptor.EncryptDeterministic(*req.NationalID)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to encrypt national_id: %w", err)
 		}
-		citizen.NationalID = enc
+		exists, err := s.citizenRepo.ExistsByNationalID(ctx, encCheck, id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check duplicate national_id: %w", err)
+		}
+		if exists {
+			return nil, fmt.Errorf("national_id already exists")
+		}
+		citizen.NationalID = encCheck
 	}
 	if req.PhoneNumber != nil {
 		enc, _ := s.encryptor.Encrypt(*req.PhoneNumber)
