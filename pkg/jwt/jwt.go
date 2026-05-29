@@ -7,19 +7,48 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Role định nghĩa vai trò người dùng
+// Role định nghĩa vai trò người dùng — 9 role theo đặc tả
 type Role string
 
 const (
-	RoleAdmin   Role = "admin"
-	RoleCitizen Role = "citizen"
+	RoleSuperAdmin       Role = "super_admin"
+	RoleNationalManager  Role = "national_manager"
+	RoleProvinceManager  Role = "province_manager"
+	RoleDistrictManager  Role = "district_manager"
+	RoleWardOfficer      Role = "ward_officer"
+	RoleDataEntry        Role = "data_entry"
+	RoleAuditor          Role = "auditor"
+	RoleAnalyticsViewer  Role = "analytics_viewer"
+	RoleCitizenSelf      Role = "citizen_self"
 )
 
-// Claims là payload của JWT
+// AllRoles là danh sách toàn bộ role hợp lệ — dùng để validate trong register
+var AllRoles = []Role{
+	RoleSuperAdmin, RoleNationalManager, RoleProvinceManager,
+	RoleDistrictManager, RoleWardOfficer, RoleDataEntry,
+	RoleAuditor, RoleAnalyticsViewer, RoleCitizenSelf,
+}
+
+// IsValid kiểm tra role có hợp lệ không
+func (r Role) IsValid() bool {
+	for _, v := range AllRoles {
+		if r == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Claims là payload bên trong JWT token.
+// Ngoài role, lưu thêm province/district/ward code để middleware
+// lọc dữ liệu theo địa bàn mà không cần query DB mỗi request.
 type Claims struct {
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
-	Role     Role   `json:"role"`
+	UserID       string `json:"user_id"`
+	Username     string `json:"username"`
+	Role         Role   `json:"role"`
+	ProvinceCode string `json:"province_code,omitempty"` // dùng cho province_manager
+	DistrictCode string `json:"district_code,omitempty"` // dùng cho district_manager
+	WardCode     string `json:"ward_code,omitempty"`     // dùng cho ward_officer
 	jwt.RegisteredClaims
 }
 
@@ -31,8 +60,6 @@ type Manager struct {
 	refreshTTL    time.Duration
 }
 
-// New tạo JWT Manager mới
-// accessSecret và refreshSecret nên khác nhau để tránh dùng lẫn token
 func New(accessSecret, refreshSecret string, accessTTL, refreshTTL time.Duration) *Manager {
 	return &Manager{
 		accessSecret:  []byte(accessSecret),
@@ -42,12 +69,14 @@ func New(accessSecret, refreshSecret string, accessTTL, refreshTTL time.Duration
 	}
 }
 
-// GenerateAccessToken tạo JWT access token (thời gian ngắn)
-func (m *Manager) GenerateAccessToken(userID, username string, role Role) (string, error) {
+func (m *Manager) GenerateAccessToken(userID, username string, role Role, provinceCode, districtCode, wardCode string) (string, error) {
 	claims := &Claims{
-		UserID:   userID,
-		Username: username,
-		Role:     role,
+		UserID:       userID,
+		Username:     username,
+		Role:         role,
+		ProvinceCode: provinceCode,
+		DistrictCode: districtCode,
+		WardCode:     wardCode,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(m.accessTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -58,12 +87,14 @@ func (m *Manager) GenerateAccessToken(userID, username string, role Role) (strin
 	return token.SignedString(m.accessSecret)
 }
 
-// GenerateRefreshToken tạo JWT refresh token (thời gian dài)
-func (m *Manager) GenerateRefreshToken(userID, username string, role Role) (string, error) {
+func (m *Manager) GenerateRefreshToken(userID, username string, role Role, provinceCode, districtCode, wardCode string) (string, error) {
 	claims := &Claims{
-		UserID:   userID,
-		Username: username,
-		Role:     role,
+		UserID:       userID,
+		Username:     username,
+		Role:         role,
+		ProvinceCode: provinceCode,
+		DistrictCode: districtCode,
+		WardCode:     wardCode,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(m.refreshTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -74,19 +105,16 @@ func (m *Manager) GenerateRefreshToken(userID, username string, role Role) (stri
 	return token.SignedString(m.refreshSecret)
 }
 
-// ValidateAccessToken xác thực và parse access token
 func (m *Manager) ValidateAccessToken(tokenStr string) (*Claims, error) {
 	return m.validate(tokenStr, m.accessSecret)
 }
 
-// ValidateRefreshToken xác thực và parse refresh token
 func (m *Manager) ValidateRefreshToken(tokenStr string) (*Claims, error) {
 	return m.validate(tokenStr, m.refreshSecret)
 }
 
 func (m *Manager) validate(tokenStr string, secret []byte) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (interface{}, error) {
-		// Đảm bảo dùng đúng algorithm
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
@@ -95,7 +123,6 @@ func (m *Manager) validate(tokenStr string, secret []byte) (*Claims, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	claims, ok := token.Claims.(*Claims)
 	if !ok || !token.Valid {
 		return nil, errors.New("invalid token")

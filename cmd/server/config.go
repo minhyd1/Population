@@ -22,6 +22,8 @@ type Config struct {
 	DBName     string
 	DBSSLMode  string
 	EncryptionKey string
+	JWTAccessSecret  string
+    JWTRefreshSecret string
 }
 
 // LoadConfig loads config from .env and environment variables
@@ -39,6 +41,8 @@ func LoadConfig() *Config {
 		DBName:        getEnv("DB_NAME", "population_db"),
 		DBSSLMode:     getEnv("DB_SSLMODE", "disable"),
 		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
+		JWTAccessSecret:  getEnv("JWT_ACCESS_SECRET", "your-access-secret-key"),
+		JWTRefreshSecret: getEnv("JWT_REFRESH_SECRET", "your-refresh-secret-key"),
 	}
 
 	if cfg.EncryptionKey == "" {
