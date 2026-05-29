@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"population-service/internal/model"
 	"population-service/internal/service"
-	"population-service/pkg/crypto"
 	"population-service/pkg/response"
 	"strings"
 
@@ -13,11 +12,10 @@ import (
 
 type CitizenHandler struct {
 	svc service.CitizenService
-	enc *crypto.Encryptor
 }
 
-func NewCitizenHandler(svc service.CitizenService, enc *crypto.Encryptor) *CitizenHandler {
-	return &CitizenHandler{svc: svc, enc: enc}
+func NewCitizenHandler(svc service.CitizenService) *CitizenHandler {
+	return &CitizenHandler{svc: svc}
 }
 
 func (h *CitizenHandler) Create(c *gin.Context) {
@@ -131,12 +129,4 @@ func (h *CitizenHandler) GetPopulationStatByProvince(c *gin.Context) {
 		return
 	}
 	response.OK(c, stat)
-}
-
-func (h *CitizenHandler) GetEncryptionMeta(c *gin.Context) {
-	response.OK(c, model.EncryptionMetaResponse{
-		Algorithm:  "AES-256-GCM",
-		KeyVersion: "v1",
-		Fields:     crypto.SensitiveFields,
-	})
 }

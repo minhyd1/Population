@@ -55,30 +55,27 @@ type ListCitizenFilter struct {
 
 // ========== RESPONSE DTOs ==========
 
-// CitizenResponse - response trả về cho client
+// CitizenResponse - response trả về cho client.
 // Các trường nhạy cảm (NationalID, PhoneNumber, Email, PermanentAddress)
-// được MÃ HÓA AES-256-GCM trước khi trả về client.
-// Frontend sẽ giải mã bằng shared key.
+// đã được server decrypt — client nhận plaintext qua HTTPS, không cần xử lý thêm.
 type CitizenResponse struct {
-	ID              string        `json:"id"`
-	FullName        string        `json:"full_name"`
-	DateOfBirth     time.Time     `json:"date_of_birth"`
-	Gender          Gender        `json:"gender"`
-	NationalID      string        `json:"national_id"`       // ENCRYPTED (base64 ciphertext)
-	PhoneNumber     string        `json:"phone_number"`      // ENCRYPTED
-	Email           string        `json:"email"`             // ENCRYPTED
-	PermanentAddress string       `json:"permanent_address"` // ENCRYPTED
-	Religion        string        `json:"religion"`
-	Ethnicity       string        `json:"ethnicity"`
-	MaritalStatus   MaritalStatus `json:"marital_status"`
-	ProvinceCode    string        `json:"province_code"`
-	DistrictCode    string        `json:"district_code"`
-	WardCode        string        `json:"ward_code"`
-	IsAlive         bool          `json:"is_alive"`
-	CreatedAt       time.Time     `json:"created_at"`
-	UpdatedAt       time.Time     `json:"updated_at"`
-	// Metadata for frontend to know which fields are encrypted
-	EncryptedFields []string `json:"encrypted_fields"`
+	ID               string        `json:"id"`
+	FullName         string        `json:"full_name"`
+	DateOfBirth      time.Time     `json:"date_of_birth"`
+	Gender           Gender        `json:"gender"`
+	NationalID       string        `json:"national_id"`
+	PhoneNumber      string        `json:"phone_number"`
+	Email            string        `json:"email"`
+	PermanentAddress string        `json:"permanent_address"`
+	Religion         string        `json:"religion"`
+	Ethnicity        string        `json:"ethnicity"`
+	MaritalStatus    MaritalStatus `json:"marital_status"`
+	ProvinceCode     string        `json:"province_code"`
+	DistrictCode     string        `json:"district_code"`
+	WardCode         string        `json:"ward_code"`
+	IsAlive          bool          `json:"is_alive"`
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
 }
 
 // CitizenListResponse - paginated list
@@ -109,9 +106,5 @@ type ProvinceResponse struct {
 	NameEn string `json:"name_en"`
 }
 
-// EncryptionMetaResponse - trả về public key info cho frontend
-type EncryptionMetaResponse struct {
-	Algorithm  string `json:"algorithm"`   // "AES-256-GCM"
-	KeyVersion string `json:"key_version"` // for key rotation
-	Fields     []string `json:"encrypted_fields"`
-}
+// EncryptionMetaResponse đã được xóa.
+// Server tự decrypt trước khi trả response — client không cần biết thông tin mã hóa.

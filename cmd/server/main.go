@@ -44,7 +44,7 @@ func main() {
 	auditSvc   := service.NewAuditService(auditRepo)
 
 	// ── Handlers ────────────────────────────────────────────
-	citizenHandler := handler.NewCitizenHandler(citizenSvc, enc)
+	citizenHandler := handler.NewCitizenHandler(citizenSvc)
 	authHandler    := handler.NewAuthHandler(authSvc)
 	auditHandler   := handler.NewAuditHandler(auditSvc)
 
@@ -94,7 +94,6 @@ func main() {
 			admin.POST("/users/:id/reset-password", authHandler.ResetPassword)
 			admin.POST("/users/:id/lock",           authHandler.LockUser)
 			admin.POST("/users/:id/unlock",         authHandler.UnlockUser)
-			admin.GET("/encryption/meta",           citizenHandler.GetEncryptionMeta)
 		}
 
 		// ── /citizens ─────────────────────────────────────────

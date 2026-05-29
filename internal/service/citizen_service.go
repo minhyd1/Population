@@ -337,17 +337,23 @@ func (s *citizenService) GetPopulationStatByProvince(ctx context.Context, provin
 // Private helpers
 // ──────────────────────────────────────────────────────────
 
-// toResponse chuyển Citizen domain → CitizenResponse DTO
+// toResponse chuyển Citizen domain → CitizenResponse DTO.
+// Các trường nhạy cảm được decrypt tại server — client nhận plaintext qua HTTPS.
 func (s *citizenService) toResponse(c *model.Citizen) *model.CitizenResponse {
+	nationalID, _       := s.encryptor.Decrypt(c.NationalID)
+	phoneNumber, _      := s.encryptor.Decrypt(c.PhoneNumber)
+	email, _            := s.encryptor.Decrypt(c.Email)
+	permanentAddress, _ := s.encryptor.Decrypt(c.PermanentAddress)
+
 	return &model.CitizenResponse{
 		ID:               c.ID,
 		FullName:         c.FullName,
 		DateOfBirth:      c.DateOfBirth,
 		Gender:           c.Gender,
-		NationalID:       c.NationalID,
-		PhoneNumber:      c.PhoneNumber,
-		Email:            c.Email,
-		PermanentAddress: c.PermanentAddress,
+		NationalID:       nationalID,
+		PhoneNumber:      phoneNumber,
+		Email:            email,
+		PermanentAddress: permanentAddress,
 		Religion:         c.Religion,
 		Ethnicity:        c.Ethnicity,
 		MaritalStatus:    c.MaritalStatus,
@@ -357,7 +363,6 @@ func (s *citizenService) toResponse(c *model.Citizen) *model.CitizenResponse {
 		IsAlive:          c.IsAlive,
 		CreatedAt:        c.CreatedAt,
 		UpdatedAt:        c.UpdatedAt,
-		EncryptedFields:  crypto.SensitiveFields,
 	}
 }
 
