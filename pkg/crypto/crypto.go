@@ -1,8 +1,14 @@
 // Package crypto cung cấp mã hóa/giải mã AES-256-GCM cho các trường nhạy cảm.
-// Frontend sử dụng cùng key để giải mã các trường được đánh dấu encrypted_fields.
+// Frontend sử dụng cùng shared key để giải mã các trường được đánh dấu encrypted_fields.
 //
-// Flow:
-//   DB (encrypted) → Service (decrypt for internal use) → Handler (re-encrypt for response) → Client
+// Flow thực tế:
+//   Request  → Service (encrypt plaintext) → DB (lưu ciphertext)
+//   DB (ciphertext) → toResponse() → API response (trả ciphertext thẳng, KHÔNG decrypt)
+//   Client nhận ciphertext → dùng shared key để decrypt phía frontend
+//
+// Lưu ý: Service chỉ decrypt khi cần xử lý nội bộ (ví dụ: ghi audit log, kiểm tra trùng lặp).
+// Shared key phải được phân phối cho client qua kênh bảo mật ngoài băng tần (out-of-band),
+// KHÔNG được trả key qua API response.
 //
 // Frontend decrypt (JavaScript example):
 //
@@ -20,6 +26,7 @@ package crypto
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -139,9 +146,14 @@ func GenerateKey() (string, error) {
 	return base64.StdEncoding.EncodeToString(key), nil
 }
 
-// EncryptDeterministic mã hóa với IV cố định (không ngẫu nhiên).
-// Cùng plaintext + cùng key → luôn cho cùng ciphertext.
+// EncryptDeterministic mã hóa deterministic: cùng plaintext + cùng key → cùng ciphertext.
 // Dùng riêng cho national_id để DB có thể kiểm tra UNIQUE.
+//
+// Cải tiến so với phiên bản cũ: IV được derive bằng HMAC-SHA256(key, plaintext)
+// thay vì SHA256(key). Điều này đảm bảo:
+//   - Cùng plaintext + cùng key → cùng IV (deterministic ✓)
+//   - Khác plaintext → khác IV, tránh IV reuse attack
+//   - Khi rotation key, IV tự động thay đổi theo key mới
 func (e *Encryptor) EncryptDeterministic(plaintext string) (string, error) {
 	if plaintext == "" {
 		return "", nil
@@ -154,9 +166,11 @@ func (e *Encryptor) EncryptDeterministic(plaintext string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// IV cố định 12 bytes, derive từ key → cùng input luôn cho cùng output
-	h := sha256.Sum256(e.key)
-	iv := h[:gcm.NonceSize()]
+	// Derive IV = HMAC-SHA256(key, plaintext)[:12]
+	// An toàn hơn SHA256(key) vì IV phụ thuộc cả key lẫn plaintext
+	mac := hmac.New(sha256.New, e.key)
+	mac.Write([]byte(plaintext))
+	iv := mac.Sum(nil)[:gcm.NonceSize()] // lấy 12 bytes đầu
 	ciphertext := gcm.Seal(iv, iv, []byte(plaintext), nil)
 	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
@@ -168,5 +182,3 @@ var SensitiveFields = []string{
 	"email",
 	"permanent_address",
 }
-
-

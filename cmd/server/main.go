@@ -32,15 +32,21 @@ func main() {
 		7*24*time.Hour,
 	)
 
+	// ── Repositories ────────────────────────────────────────
 	citizenRepo  := repository.NewCitizenRepository(db)
 	provinceRepo := repository.NewProvinceRepository(db)
 	userRepo     := repository.NewUserRepository(db)
+	auditRepo    := repository.NewAuditRepository(db)
 
-	citizenSvc := service.NewCitizenService(citizenRepo, provinceRepo, enc)
+	// ── Services ────────────────────────────────────────────
+	citizenSvc := service.NewCitizenService(citizenRepo, provinceRepo, auditRepo, enc)
 	authSvc    := service.NewAuthService(userRepo, jwtManager)
+	auditSvc   := service.NewAuditService(auditRepo)
 
+	// ── Handlers ────────────────────────────────────────────
 	citizenHandler := handler.NewCitizenHandler(citizenSvc, enc)
 	authHandler    := handler.NewAuthHandler(authSvc)
+	auditHandler   := handler.NewAuditHandler(auditSvc)
 
 	if cfg.AppEnv == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -58,7 +64,7 @@ func main() {
 
 	v1 := r.Group("/api/v1")
 
-	// ── Public ────────────────────────────────────────────────
+	// ── Public ────────────────────────────────────────────
 	auth := v1.Group("/auth")
 	{
 		auth.POST("/login",   authHandler.Login)
@@ -72,9 +78,9 @@ func main() {
 		// Mọi user đã login đều dùng được
 		authGroup := protected.Group("/auth")
 		{
-			authGroup.GET("/me",             authHandler.Me)
-			authGroup.POST("/logout",        authHandler.Logout)
-			authGroup.POST("/logout-all",    authHandler.LogoutAll)
+			authGroup.GET("/me",               authHandler.Me)
+			authGroup.POST("/logout",          authHandler.Logout)
+			authGroup.POST("/logout-all",      authHandler.LogoutAll)
 			authGroup.POST("/change-password", authHandler.ChangePassword)
 		}
 
@@ -82,48 +88,43 @@ func main() {
 		admin := protected.Group("/admin")
 		admin.Use(middleware.RequireRole(jwtpkg.RoleSuperAdmin))
 		{
-			admin.POST("/users",                  authHandler.Register)
-			admin.GET("/users",                   authHandler.ListUsers)
-			admin.PATCH("/users/:id",             authHandler.UpdateUser)
+			admin.POST("/users",                    authHandler.Register)
+			admin.GET("/users",                     authHandler.ListUsers)
+			admin.PATCH("/users/:id",               authHandler.UpdateUser)
 			admin.POST("/users/:id/reset-password", authHandler.ResetPassword)
-			admin.POST("/users/:id/lock",         authHandler.LockUser)
-			admin.POST("/users/:id/unlock",       authHandler.UnlockUser)
-			admin.GET("/encryption/meta",         citizenHandler.GetEncryptionMeta)
+			admin.POST("/users/:id/lock",           authHandler.LockUser)
+			admin.POST("/users/:id/unlock",         authHandler.UnlockUser)
+			admin.GET("/encryption/meta",           citizenHandler.GetEncryptionMeta)
 		}
 
 		// ── /citizens ─────────────────────────────────────────
 		citizens := protected.Group("/citizens")
-		citizens.Use(middleware.RequireScopeMatch()) // lọc địa bàn tự động
+		citizens.Use(middleware.RequireScopeMatch())
 		{
-			// Xem danh sách: từ ward_officer trở lên
 			citizens.GET("", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
 				jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor,
 			), citizenHandler.List)
 
-			// Xem chi tiết: tương tự, thêm citizen_self (chỉ xem của mình — logic trong handler)
 			citizens.GET("/:id", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
 				jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor, jwtpkg.RoleCitizenSelf,
 			), citizenHandler.GetByID)
 
-			// Tạo mới: từ ward_officer trở lên (data_entry cũng được)
 			citizens.POST("", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
 				jwtpkg.RoleWardOfficer, jwtpkg.RoleDataEntry,
 			), citizenHandler.Create)
 
-			// Cập nhật: từ ward_officer trở lên, không cho data_entry (cần duyệt)
 			citizens.PATCH("/:id", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
 				jwtpkg.RoleWardOfficer,
 			), citizenHandler.Update)
 
-			// Xóa: chỉ super_admin và national_manager
 			citizens.DELETE("/:id", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 			), citizenHandler.Delete)
@@ -132,13 +133,11 @@ func main() {
 		// ── /population — thống kê ───────────────────────────
 		population := protected.Group("/population")
 		{
-			// Thống kê toàn quốc: super_admin, national_manager, auditor, analytics_viewer
 			population.GET("/stats", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleAuditor, jwtpkg.RoleAnalyticsViewer,
 			), citizenHandler.GetPopulationStats)
 
-			// Thống kê theo tỉnh: thêm province/district/ward manager
 			population.GET("/stats/:province_code",
 				middleware.RequireRole(
 					jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
@@ -149,11 +148,20 @@ func main() {
 				citizenHandler.GetPopulationStatByProvince,
 			)
 		}
+
+		// ── /audit-logs — lịch sử chỉnh sửa ─────────────────
+		// Chỉ super_admin, national_manager và auditor được xem
+		protected.GET("/audit-logs", middleware.RequireRole(
+			jwtpkg.RoleSuperAdmin,
+			jwtpkg.RoleNationalManager,
+			jwtpkg.RoleAuditor,
+		), auditHandler.List)
 	}
 
 	addr := fmt.Sprintf(":%s", cfg.AppPort)
 	log.Printf("🚀 Population Service running on http://localhost%s", addr)
 	log.Printf("👥 Roles: super_admin | national_manager | province_manager | district_manager | ward_officer | data_entry | auditor | analytics_viewer | citizen_self")
+	log.Printf("📋 Audit log: GET /api/v1/audit-logs (super_admin, national_manager, auditor)")
 
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Server failed: %v", err)

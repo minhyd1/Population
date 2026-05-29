@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -10,7 +11,7 @@ import (
 
 const ClaimsKey = "jwt_claims"
 
-// JWTAuth xác thực access token, đặt claims vào gin context
+// JWTAuth xác thực access token, đặt claims vào gin context và request context
 func JWTAuth(jwtManager *jwtpkg.Manager) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
@@ -40,7 +41,20 @@ func JWTAuth(jwtManager *jwtpkg.Manager) gin.HandlerFunc {
 			return
 		}
 
+		// Đặt claims vào gin context (dùng cho middleware khác như RequireRole)
 		c.Set(ClaimsKey, claims)
+		c.Set(string(ContextKeyUserID), claims.UserID)
+		c.Set(string(ContextKeyUsername), claims.Username)
+		c.Set(string(ContextKeyUserRole), string(claims.Role))
+
+		// Inject audit info vào request context để service layer có thể lấy qua ctx.Value()
+		// Dùng string key type riêng để tránh collision với các package khác
+		reqCtx := c.Request.Context()
+		reqCtx = context.WithValue(reqCtx, ContextKeyUserID, claims.UserID)
+		reqCtx = context.WithValue(reqCtx, ContextKeyUsername, claims.Username)
+		reqCtx = context.WithValue(reqCtx, ContextKeyUserRole, string(claims.Role))
+		c.Request = c.Request.WithContext(reqCtx)
+
 		c.Next()
 	}
 }
@@ -62,8 +76,8 @@ func RequireRole(roles ...jwtpkg.Role) gin.HandlerFunc {
 		}
 		if !roleSet[claims.Role] {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"success": false,
-				"error":   "forbidden: insufficient permissions",
+				"success":   false,
+				"error":     "forbidden: insufficient permissions",
 				"your_role": string(claims.Role),
 			})
 			return
@@ -73,9 +87,6 @@ func RequireRole(roles ...jwtpkg.Role) gin.HandlerFunc {
 }
 
 // RequireMinRole dùng role hierarchy — role có cấp >= minRole thì qua
-// Thứ tự ưu tiên từ cao xuống thấp:
-// super_admin > national_manager > province_manager > district_manager
-// > ward_officer > data_entry | auditor | analytics_viewer | citizen_self
 func RequireMinRole(minRole jwtpkg.Role) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims := GetClaims(c)
@@ -85,10 +96,10 @@ func RequireMinRole(minRole jwtpkg.Role) gin.HandlerFunc {
 		}
 		if roleLevel(claims.Role) < roleLevel(minRole) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"success":    false,
-				"error":      "forbidden: insufficient permissions",
-				"your_role":  string(claims.Role),
-				"required":   string(minRole),
+				"success":  false,
+				"error":    "forbidden: insufficient permissions",
+				"your_role": string(claims.Role),
+				"required": string(minRole),
 			})
 			return
 		}
@@ -97,8 +108,6 @@ func RequireMinRole(minRole jwtpkg.Role) gin.HandlerFunc {
 }
 
 // RequireScopeMatch đảm bảo user chỉ truy cập đúng địa bàn của mình.
-// super_admin và national_manager không bị giới hạn địa bàn.
-// Dùng cho các endpoint nhận :province_code, :district_code, :ward_code.
 func RequireScopeMatch() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims := GetClaims(c)
@@ -113,7 +122,6 @@ func RequireScopeMatch() gin.HandlerFunc {
 			return
 		}
 
-		// Kiểm tra province_code nếu có trong path/query
 		if pc := paramOrQuery(c, "province_code"); pc != "" && claims.ProvinceCode != "" {
 			if claims.ProvinceCode != pc {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
@@ -124,7 +132,6 @@ func RequireScopeMatch() gin.HandlerFunc {
 			}
 		}
 
-		// Kiểm tra district_code
 		if dc := paramOrQuery(c, "district_code"); dc != "" && claims.DistrictCode != "" {
 			if claims.DistrictCode != dc {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
@@ -135,7 +142,6 @@ func RequireScopeMatch() gin.HandlerFunc {
 			}
 		}
 
-		// Kiểm tra ward_code
 		if wc := paramOrQuery(c, "ward_code"); wc != "" && claims.WardCode != "" {
 			if claims.WardCode != wc {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
@@ -157,7 +163,7 @@ func GetClaims(c *gin.Context) *jwtpkg.Claims {
 	return claims
 }
 
-// roleLevel trả về cấp bậc của role (số càng cao = càng nhiều quyền)
+// roleLevel trả về cấp bậc của role
 func roleLevel(r jwtpkg.Role) int {
 	switch r {
 	case jwtpkg.RoleSuperAdmin:
