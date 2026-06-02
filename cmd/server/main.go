@@ -10,9 +10,12 @@ import (
 	"population-service/internal/handler"
 	"population-service/internal/repository"
 	"population-service/internal/service"
+	citizensvc "population-service/internal/service/citizen"
 	"population-service/pkg/crypto"
 	jwtpkg "population-service/pkg/jwt"
 	"population-service/pkg/middleware"
+	"population-service/pkg/ratelimit"
+	redispkg "population-service/pkg/redis"
 )
 
 func main() {
@@ -32,18 +35,43 @@ func main() {
 		7*24*time.Hour,
 	)
 
-	// ── Repositories ────────────────────────────────────────
+	// ── Redis (optional) ──────────────────────────────────────
+	// Nếu REDIS_ENABLED=false hoặc Redis không kết nối được,
+	// server vẫn chạy bình thường nhưng không có rate limiting và token blacklist.
+	var redisClient *redispkg.Client
+	if cfg.RedisEnabled {
+		redisClient, err = redispkg.New(cfg.RedisHost, cfg.RedisPort, cfg.RedisPassword, cfg.RedisDB)
+		if err != nil {
+			log.Printf("⚠️  Redis unavailable: %v — running without rate limiting", err)
+		} else {
+			defer redisClient.Close()
+		}
+	}
+
+	// ── Rate limiter ───────────────────────────────────────────
+	// limiter sẽ là nil nếu Redis không kết nối được
+	var limiter *ratelimit.Limiter
+	if redisClient != nil {
+		limiter = ratelimit.New(redisClient)
+		log.Println("✅ Rate limiting enabled")
+	} else {
+		log.Println("⚠️  Rate limiting disabled (no Redis)")
+	}
+
+	// ── Repositories ──────────────────────────────────────────
 	citizenRepo  := repository.NewCitizenRepository(db)
 	provinceRepo := repository.NewProvinceRepository(db)
 	userRepo     := repository.NewUserRepository(db)
 	auditRepo    := repository.NewAuditRepository(db)
 
-	// ── Services ────────────────────────────────────────────
-	citizenSvc := service.NewCitizenService(citizenRepo, provinceRepo, auditRepo, enc)
-	authSvc    := service.NewAuthService(userRepo, jwtManager)
+	// ── Services ──────────────────────────────────────────────
+	// NewAuthService nhận Redis optional — nếu nil, Logout vẫn hoạt động
+	// nhưng không blacklist access token
+	citizenSvc := citizensvc.New(citizenRepo, provinceRepo, auditRepo, enc)
+	authSvc    := service.NewAuthService(userRepo, jwtManager, redisClient)
 	auditSvc   := service.NewAuditService(auditRepo)
 
-	// ── Handlers ────────────────────────────────────────────
+	// ── Handlers ──────────────────────────────────────────────
 	citizenHandler := handler.NewCitizenHandler(citizenSvc)
 	authHandler    := handler.NewAuthHandler(authSvc)
 	auditHandler   := handler.NewAuditHandler(auditSvc)
@@ -59,24 +87,44 @@ func main() {
 	r.Use(gin.Recovery())
 
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "population-service"})
+		redisOK := redisClient != nil
+		c.JSON(http.StatusOK, gin.H{
+			"status":        "ok",
+			"service":       "population-service",
+			"redis_enabled": redisOK,
+		})
 	})
 
 	v1 := r.Group("/api/v1")
 
-	// ── Public ────────────────────────────────────────────
+	// ── Public ────────────────────────────────────────────────
 	auth := v1.Group("/auth")
 	{
-		auth.POST("/login",   authHandler.Login)
-		auth.POST("/refresh", authHandler.Refresh)
+		// Login: 10 request / 15 phút theo IP
+		if limiter != nil {
+			auth.POST("/login", limiter.ByIP(ratelimit.RuleLogin, "login"), authHandler.Login)
+		} else {
+			auth.POST("/login", authHandler.Login)
+		}
+
+		// Refresh: 30 request / 15 phút theo IP
+		if limiter != nil {
+			auth.POST("/refresh", limiter.ByIP(ratelimit.RuleRefresh, "refresh"), authHandler.Refresh)
+		} else {
+			auth.POST("/refresh", authHandler.Refresh)
+		}
 	}
 
-	// ── Protected — tất cả route bên dưới cần JWT ────────────
+	// ── Protected — cần JWT ───────────────────────────────────
+	// JWTAuth nhận redisClient để kiểm tra token blacklist
 	protected := v1.Group("")
-	protected.Use(middleware.JWTAuth(jwtManager))
+	protected.Use(middleware.JWTAuth(jwtManager, redisClient))
 	{
-		// Mọi user đã login đều dùng được
 		authGroup := protected.Group("/auth")
+		// Rate limit chung cho API: 200 req/phút theo userID
+		if limiter != nil {
+			authGroup.Use(limiter.ByUser(ratelimit.RuleAPI, "auth"))
+		}
 		{
 			authGroup.GET("/me",               authHandler.Me)
 			authGroup.POST("/logout",          authHandler.Logout)
@@ -84,9 +132,12 @@ func main() {
 			authGroup.POST("/change-password", authHandler.ChangePassword)
 		}
 
-		// ── /admin — chỉ super_admin ─────────────────────────
+		// ── /admin — chỉ super_admin ──────────────────────────
 		admin := protected.Group("/admin")
 		admin.Use(middleware.RequireRole(jwtpkg.RoleSuperAdmin))
+		if limiter != nil {
+			admin.Use(limiter.ByUser(ratelimit.RuleAdmin, "admin"))
+		}
 		{
 			admin.POST("/users",                    authHandler.Register)
 			admin.GET("/users",                     authHandler.ListUsers)
@@ -99,43 +150,47 @@ func main() {
 		// ── /citizens ─────────────────────────────────────────
 		citizens := protected.Group("/citizens")
 		citizens.Use(middleware.RequireScopeMatch())
+		if limiter != nil {
+			// Write (POST/PATCH/DELETE): 60 req/phút per user
+			// Read (GET): 200 req/phút per user — dùng RuleAPI
+		}
 		{
 			citizens.GET("", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
 				jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor,
-			), citizenHandler.List)
+			), withRL(limiter, ratelimit.RuleAPI, "citizens_read"), citizenHandler.List)
 
 			citizens.GET("/:id", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
 				jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor, jwtpkg.RoleCitizenSelf,
-			), citizenHandler.GetByID)
+			), withRL(limiter, ratelimit.RuleAPI, "citizens_read"), citizenHandler.GetByID)
 
 			citizens.POST("", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
 				jwtpkg.RoleWardOfficer, jwtpkg.RoleDataEntry,
-			), citizenHandler.Create)
+			), withRL(limiter, ratelimit.RuleWrite, "citizens_write"), citizenHandler.Create)
 
 			citizens.PATCH("/:id", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
 				jwtpkg.RoleWardOfficer,
-			), citizenHandler.Update)
+			), withRL(limiter, ratelimit.RuleWrite, "citizens_write"), citizenHandler.Update)
 
 			citizens.DELETE("/:id", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
-			), citizenHandler.Delete)
+			), withRL(limiter, ratelimit.RuleWrite, "citizens_write"), citizenHandler.Delete)
 		}
 
-		// ── /population — thống kê ───────────────────────────
+		// ── /population — thống kê ────────────────────────────
 		population := protected.Group("/population")
 		{
 			population.GET("/stats", middleware.RequireRole(
 				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
 				jwtpkg.RoleAuditor, jwtpkg.RoleAnalyticsViewer,
-			), citizenHandler.GetPopulationStats)
+			), withRL(limiter, ratelimit.RuleAPI, "stats"), citizenHandler.GetPopulationStats)
 
 			population.GET("/stats/:province_code",
 				middleware.RequireRole(
@@ -144,25 +199,34 @@ func main() {
 					jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor, jwtpkg.RoleAnalyticsViewer,
 				),
 				middleware.RequireScopeMatch(),
+				withRL(limiter, ratelimit.RuleAPI, "stats"),
 				citizenHandler.GetPopulationStatByProvince,
 			)
 		}
 
-		// ── /audit-logs — lịch sử chỉnh sửa ─────────────────
-		// Chỉ super_admin, national_manager và auditor được xem
+		// ── /audit-logs ───────────────────────────────────────
 		protected.GET("/audit-logs", middleware.RequireRole(
 			jwtpkg.RoleSuperAdmin,
 			jwtpkg.RoleNationalManager,
 			jwtpkg.RoleAuditor,
-		), auditHandler.List)
+		), withRL(limiter, ratelimit.RuleAPI, "audit"), auditHandler.List)
 	}
 
 	addr := fmt.Sprintf(":%s", cfg.AppPort)
 	log.Printf("🚀 Population Service running on http://localhost%s", addr)
+	log.Printf("🔒 Rate limiting: login=10/15min | api=200/min | write=60/min")
 	log.Printf("👥 Roles: super_admin | national_manager | province_manager | district_manager | ward_officer | data_entry | auditor | analytics_viewer | citizen_self")
-	log.Printf("📋 Audit log: GET /api/v1/audit-logs (super_admin, national_manager, auditor)")
 
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+// withRL là helper — trả về rate limit middleware nếu limiter != nil,
+// ngược lại trả về middleware no-op để router không bị nil handler.
+func withRL(limiter *ratelimit.Limiter, rule ratelimit.Rule, group string) gin.HandlerFunc {
+	if limiter == nil {
+		return func(c *gin.Context) { c.Next() }
+	}
+	return limiter.ByUser(rule, group)
 }

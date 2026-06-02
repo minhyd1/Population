@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -11,38 +12,49 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// Config holds all application config
 type Config struct {
-	AppPort    string
-	AppEnv     string
-	DBHost     string
-	DBPort     string
-	DBUser     string
-	DBPassword string
-	DBName     string
-	DBSSLMode  string
-	EncryptionKey string
+	AppPort       string
+	AppEnv        string
+	DBHost        string
+	DBPort        string
+	DBUser        string
+	DBPassword    string
+	DBName        string
+	DBSSLMode     string
+	EncryptionKey    string
 	JWTAccessSecret  string
-    JWTRefreshSecret string
+	JWTRefreshSecret string
+
+	// Redis
+	RedisHost     string
+	RedisPort     string
+	RedisPassword string
+	RedisDB       int
+	RedisEnabled  bool // false = chạy không có Redis (fallback in-memory)
 }
 
-// LoadConfig loads config from .env and environment variables
 func LoadConfig() *Config {
-	// Load .env file (ignore error in production where env vars are set directly)
 	_ = godotenv.Load("configs/.env")
 
+	redisDB, _ := strconv.Atoi(getEnv("REDIS_DB", "0"))
+
 	cfg := &Config{
-		AppPort:       getEnv("APP_PORT", "8080"),
-		AppEnv:        getEnv("APP_ENV", "development"),
-		DBHost:        getEnv("DB_HOST", "localhost"),
-		DBPort:        getEnv("DB_PORT", "5432"),
-		DBUser:        getEnv("DB_USER", "postgres"),
-		DBPassword:    getEnv("DB_PASSWORD", ""),
-		DBName:        getEnv("DB_NAME", "population_db"),
-		DBSSLMode:     getEnv("DB_SSLMODE", "disable"),
-		EncryptionKey: getEnv("ENCRYPTION_KEY", ""),
+		AppPort:          getEnv("APP_PORT", "8080"),
+		AppEnv:           getEnv("APP_ENV", "development"),
+		DBHost:           getEnv("DB_HOST", "localhost"),
+		DBPort:           getEnv("DB_PORT", "5432"),
+		DBUser:           getEnv("DB_USER", "postgres"),
+		DBPassword:       getEnv("DB_PASSWORD", ""),
+		DBName:           getEnv("DB_NAME", "population_db"),
+		DBSSLMode:        getEnv("DB_SSLMODE", "disable"),
+		EncryptionKey:    getEnv("ENCRYPTION_KEY", ""),
 		JWTAccessSecret:  getEnv("JWT_ACCESS_SECRET", "your-access-secret-key"),
 		JWTRefreshSecret: getEnv("JWT_REFRESH_SECRET", "your-refresh-secret-key"),
+		RedisHost:        getEnv("REDIS_HOST", "localhost"),
+		RedisPort:        getEnv("REDIS_PORT", "6379"),
+		RedisPassword:    getEnv("REDIS_PASSWORD", ""),
+		RedisDB:          redisDB,
+		RedisEnabled:     getEnv("REDIS_ENABLED", "true") != "false",
 	}
 
 	if cfg.EncryptionKey == "" {
@@ -52,7 +64,6 @@ func LoadConfig() *Config {
 	return cfg
 }
 
-// ConnectDB tạo kết nối PostgreSQL với retry
 func ConnectDB(cfg *Config) *sqlx.DB {
 	dsn := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
@@ -61,8 +72,6 @@ func ConnectDB(cfg *Config) *sqlx.DB {
 
 	var db *sqlx.DB
 	var err error
-
-	// Retry up to 5 times
 	for i := 0; i < 5; i++ {
 		db, err = sqlx.Connect("postgres", dsn)
 		if err == nil {
@@ -71,12 +80,10 @@ func ConnectDB(cfg *Config) *sqlx.DB {
 		log.Printf("DB connection attempt %d failed: %v. Retrying in 2s...", i+1, err)
 		time.Sleep(2 * time.Second)
 	}
-
 	if err != nil {
 		log.Fatalf("Cannot connect to PostgreSQL after 5 attempts: %v", err)
 	}
 
-	// Connection pool settings
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
 	db.SetConnMaxLifetime(5 * time.Minute)

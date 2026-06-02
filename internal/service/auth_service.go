@@ -12,6 +12,7 @@ import (
 	"population-service/internal/model"
 	"population-service/internal/repository"
 	jwtpkg "population-service/pkg/jwt"
+	redispkg "population-service/pkg/redis"
 )
 
 const (
@@ -23,7 +24,8 @@ type AuthService interface {
 	Register(ctx context.Context, req model.RegisterRequest) (*model.User, error)
 	Login(ctx context.Context, req model.LoginRequest) (*model.TokenResponse, error)
 	Refresh(ctx context.Context, refreshTokenStr string) (*model.TokenResponse, error)
-	Logout(ctx context.Context, refreshTokenStr string) error
+	// Logout nhận cả accessToken để blacklist ngay lập tức
+	Logout(ctx context.Context, refreshTokenStr, accessTokenJTI string) error
 	LogoutAll(ctx context.Context, userID string) error
 	ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error
 	ResetPassword(ctx context.Context, targetUserID, newPassword string) error
@@ -35,27 +37,24 @@ type AuthService interface {
 type authService struct {
 	userRepo   repository.UserRepository
 	jwtManager *jwtpkg.Manager
+	redis      *redispkg.Client // nil nếu Redis không cấu hình
 }
 
-func NewAuthService(userRepo repository.UserRepository, jwtManager *jwtpkg.Manager) AuthService {
-	return &authService{userRepo: userRepo, jwtManager: jwtManager}
+func NewAuthService(userRepo repository.UserRepository, jwtManager *jwtpkg.Manager, redis ...*redispkg.Client) AuthService {
+	svc := &authService{userRepo: userRepo, jwtManager: jwtManager}
+	if len(redis) > 0 {
+		svc.redis = redis[0]
+	}
+	return svc
 }
 
-// ──────────────────────────────────────────────────────────
-// Register — chỉ super_admin gọi; validate địa bàn theo role
-// ──────────────────────────────────────────────────────────
 func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (*model.User, error) {
-	// Validate role hợp lệ
 	if !req.Role.IsValid() {
 		return nil, errors.New("invalid role")
 	}
-
-	// Validate địa bàn bắt buộc theo role
 	if err := validateScopeForRole(req.Role, req.ProvinceCode, req.DistrictCode, req.WardCode, req.CitizenID); err != nil {
 		return nil, err
 	}
-
-	// Kiểm tra username chưa tồn tại
 	existing, err := s.userRepo.FindByUsername(ctx, req.Username)
 	if err != nil {
 		return nil, err
@@ -63,12 +62,10 @@ func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (
 	if existing != nil {
 		return nil, errors.New("username already exists")
 	}
-
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
 		return nil, err
 	}
-
 	user := &model.User{
 		ID:           uuid.New().String(),
 		Username:     req.Username,
@@ -80,22 +77,17 @@ func (s *authService) Register(ctx context.Context, req model.RegisterRequest) (
 		CitizenID:    req.CitizenID,
 		IsActive:     true,
 	}
-
 	if err := s.userRepo.Create(ctx, user); err != nil {
 		return nil, err
 	}
 	return user, nil
 }
 
-// ──────────────────────────────────────────────────────────
-// Login
-// ──────────────────────────────────────────────────────────
 func (s *authService) Login(ctx context.Context, req model.LoginRequest) (*model.TokenResponse, error) {
 	user, err := s.userRepo.FindByUsername(ctx, req.Username)
 	if err != nil {
 		return nil, err
 	}
-	// Dùng cùng thông báo để tránh user enumeration attack
 	if user == nil {
 		return nil, errors.New("invalid username or password")
 	}
@@ -105,15 +97,11 @@ func (s *authService) Login(ctx context.Context, req model.LoginRequest) (*model
 	return s.issueTokenPair(ctx, user)
 }
 
-// ──────────────────────────────────────────────────────────
-// Refresh — token rotation
-// ──────────────────────────────────────────────────────────
 func (s *authService) Refresh(ctx context.Context, refreshTokenStr string) (*model.TokenResponse, error) {
 	claims, err := s.jwtManager.ValidateRefreshToken(refreshTokenStr)
 	if err != nil {
 		return nil, errors.New("invalid or expired refresh token")
 	}
-
 	tokenHash := hashToken(refreshTokenStr)
 	stored, err := s.userRepo.FindRefreshToken(ctx, tokenHash)
 	if err != nil {
@@ -125,32 +113,36 @@ func (s *authService) Refresh(ctx context.Context, refreshTokenStr string) (*mod
 	if time.Now().After(stored.ExpiresAt) {
 		return nil, errors.New("refresh token has expired")
 	}
-
-	// Revoke token cũ TRƯỚC khi cấp mới (token rotation)
 	if err := s.userRepo.RevokeRefreshToken(ctx, tokenHash); err != nil {
 		return nil, err
 	}
-
-	// Lấy user mới nhất từ DB — role có thể đã thay đổi
 	user, err := s.userRepo.FindByID(ctx, claims.UserID)
 	if err != nil || user == nil {
 		return nil, errors.New("user not found")
 	}
-
 	return s.issueTokenPair(ctx, user)
 }
 
-func (s *authService) Logout(ctx context.Context, refreshTokenStr string) error {
-	return s.userRepo.RevokeRefreshToken(ctx, hashToken(refreshTokenStr))
+// Logout revoke refresh token (DB) và blacklist access token (Redis).
+// accessTokenJTI là claims.ID từ JWT — nếu rỗng, bỏ qua bước blacklist.
+func (s *authService) Logout(ctx context.Context, refreshTokenStr, accessTokenJTI string) error {
+	// 1. Revoke refresh token trong DB
+	if refreshTokenStr != "" {
+		_ = s.userRepo.RevokeRefreshToken(ctx, hashToken(refreshTokenStr))
+	}
+	// 2. Blacklist access token trong Redis cho đến khi nó tự hết hạn
+	if s.redis != nil && accessTokenJTI != "" {
+		_ = s.redis.SetBlacklist(ctx, accessTokenJTI, s.jwtManager.AccessTTL())
+	}
+	return nil
 }
 
 func (s *authService) LogoutAll(ctx context.Context, userID string) error {
 	return s.userRepo.RevokeAllUserTokens(ctx, userID)
+	// Lưu ý: access token đang lưu hành vẫn còn hiệu lực đến khi hết hạn (15 phút).
+	// Nếu cần revoke ngay lập tức, cần lưu toàn bộ JTI đang active — phức tạp hơn.
 }
 
-// ──────────────────────────────────────────────────────────
-// Password management
-// ──────────────────────────────────────────────────────────
 func (s *authService) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
 	user, err := s.userRepo.FindByID(ctx, userID)
 	if err != nil || user == nil {
@@ -163,7 +155,6 @@ func (s *authService) ChangePassword(ctx context.Context, userID, oldPassword, n
 	if err != nil {
 		return err
 	}
-	// Revoke tất cả token hiện tại — buộc đăng nhập lại trên mọi thiết bị
 	_ = s.userRepo.RevokeAllUserTokens(ctx, userID)
 	return s.userRepo.UpdatePassword(ctx, userID, string(newHash))
 }
@@ -177,15 +168,11 @@ func (s *authService) ResetPassword(ctx context.Context, targetUserID, newPasswo
 	return s.userRepo.UpdatePassword(ctx, targetUserID, string(newHash))
 }
 
-// ──────────────────────────────────────────────────────────
-// User management (super_admin only)
-// ──────────────────────────────────────────────────────────
 func (s *authService) UpdateUser(ctx context.Context, targetUserID string, req model.UpdateUserRequest) error {
 	user, err := s.userRepo.FindByID(ctx, targetUserID)
 	if err != nil || user == nil {
 		return errors.New("user not found")
 	}
-
 	role := user.Role
 	if req.Role != nil {
 		if !req.Role.IsValid() {
@@ -193,15 +180,9 @@ func (s *authService) UpdateUser(ctx context.Context, targetUserID string, req m
 		}
 		role = *req.Role
 	}
-
-	provinceCode := req.ProvinceCode
-	districtCode := req.DistrictCode
-	wardCode := req.WardCode
-
-	if err := s.userRepo.UpdateRole(ctx, targetUserID, role, provinceCode, districtCode, wardCode); err != nil {
+	if err := s.userRepo.UpdateRole(ctx, targetUserID, role, req.ProvinceCode, req.DistrictCode, req.WardCode); err != nil {
 		return err
 	}
-	// Role thay đổi → revoke hết token cũ để force re-login với role mới
 	if req.Role != nil {
 		_ = s.userRepo.RevokeAllUserTokens(ctx, targetUserID)
 	}
@@ -212,7 +193,6 @@ func (s *authService) SetActive(ctx context.Context, targetUserID string, active
 	if err := s.userRepo.SetActive(ctx, targetUserID, active); err != nil {
 		return err
 	}
-	// Khóa tài khoản → revoke tất cả token ngay lập tức
 	if !active {
 		_ = s.userRepo.RevokeAllUserTokens(ctx, targetUserID)
 	}
@@ -222,10 +202,6 @@ func (s *authService) SetActive(ctx context.Context, targetUserID string, active
 func (s *authService) ListUsers(ctx context.Context) ([]*model.User, error) {
 	return s.userRepo.ListUsers(ctx)
 }
-
-// ──────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────
 
 func (s *authService) issueTokenPair(ctx context.Context, user *model.User) (*model.TokenResponse, error) {
 	pc := strVal(user.ProvinceCode)
@@ -240,7 +216,6 @@ func (s *authService) issueTokenPair(ctx context.Context, user *model.User) (*mo
 	if err != nil {
 		return nil, err
 	}
-
 	rt := &model.RefreshToken{
 		ID:        uuid.New().String(),
 		UserID:    user.ID,
@@ -250,7 +225,6 @@ func (s *authService) issueTokenPair(ctx context.Context, user *model.User) (*mo
 	if err := s.userRepo.SaveRefreshToken(ctx, rt); err != nil {
 		return nil, err
 	}
-
 	return &model.TokenResponse{
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
@@ -259,7 +233,6 @@ func (s *authService) issueTokenPair(ctx context.Context, user *model.User) (*mo
 	}, nil
 }
 
-// validateScopeForRole kiểm tra trường địa bàn bắt buộc theo từng role
 func validateScopeForRole(role jwtpkg.Role, province, district, ward, citizenID *string) error {
 	switch role {
 	case jwtpkg.RoleProvinceManager:

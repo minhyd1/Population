@@ -7,12 +7,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 	jwtpkg "population-service/pkg/jwt"
+	redispkg "population-service/pkg/redis"
 )
 
 const ClaimsKey = "jwt_claims"
 
-// JWTAuth xác thực access token, đặt claims vào gin context và request context
-func JWTAuth(jwtManager *jwtpkg.Manager) gin.HandlerFunc {
+// JWTAuth xác thực access token.
+// Nếu redisClient != nil, còn kiểm tra thêm token có bị blacklist không
+// (xảy ra khi user logout trước khi token hết hạn).
+func JWTAuth(jwtManager *jwtpkg.Manager, redisClient ...*redispkg.Client) gin.HandlerFunc {
+	// redisClient là variadic để không bắt buộc — backward compatible
+	var rdb *redispkg.Client
+	if len(redisClient) > 0 {
+		rdb = redisClient[0]
+	}
+
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
@@ -41,14 +50,26 @@ func JWTAuth(jwtManager *jwtpkg.Manager) gin.HandlerFunc {
 			return
 		}
 
-		// Đặt claims vào gin context (dùng cho middleware khác như RequireRole)
+		// Kiểm tra token có bị blacklist không (chỉ khi Redis available)
+		// TokenID = JTI claim — định danh duy nhất của token này
+		if rdb != nil && claims.ID != "" {
+			blacklisted, err := rdb.IsBlacklisted(c.Request.Context(), claims.ID)
+			if err == nil && blacklisted {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"success": false,
+					"error":   "token has been revoked",
+				})
+				return
+			}
+		}
+
+		// Lưu claims vào gin context để handler và middleware sau dùng
 		c.Set(ClaimsKey, claims)
 		c.Set(string(ContextKeyUserID), claims.UserID)
 		c.Set(string(ContextKeyUsername), claims.Username)
 		c.Set(string(ContextKeyUserRole), string(claims.Role))
 
-		// Inject audit info vào request context để service layer có thể lấy qua ctx.Value()
-		// Dùng string key type riêng để tránh collision với các package khác
+		// Inject vào request context để service layer lấy qua ctx.Value()
 		reqCtx := c.Request.Context()
 		reqCtx = context.WithValue(reqCtx, ContextKeyUserID, claims.UserID)
 		reqCtx = context.WithValue(reqCtx, ContextKeyUsername, claims.Username)
@@ -86,7 +107,7 @@ func RequireRole(roles ...jwtpkg.Role) gin.HandlerFunc {
 	}
 }
 
-// RequireMinRole dùng role hierarchy — role có cấp >= minRole thì qua
+// RequireMinRole dùng role hierarchy
 func RequireMinRole(minRole jwtpkg.Role) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims := GetClaims(c)
@@ -96,10 +117,10 @@ func RequireMinRole(minRole jwtpkg.Role) gin.HandlerFunc {
 		}
 		if roleLevel(claims.Role) < roleLevel(minRole) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"success":  false,
-				"error":    "forbidden: insufficient permissions",
+				"success":   false,
+				"error":     "forbidden: insufficient permissions",
 				"your_role": string(claims.Role),
-				"required": string(minRole),
+				"required":  string(minRole),
 			})
 			return
 		}
@@ -107,7 +128,7 @@ func RequireMinRole(minRole jwtpkg.Role) gin.HandlerFunc {
 	}
 }
 
-// RequireScopeMatch đảm bảo user chỉ truy cập đúng địa bàn của mình.
+// RequireScopeMatch đảm bảo user chỉ truy cập đúng địa bàn của mình
 func RequireScopeMatch() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims := GetClaims(c)
@@ -116,7 +137,6 @@ func RequireScopeMatch() gin.HandlerFunc {
 			return
 		}
 
-		// super_admin và national_manager: không giới hạn địa bàn
 		if claims.Role == jwtpkg.RoleSuperAdmin || claims.Role == jwtpkg.RoleNationalManager {
 			c.Next()
 			return
@@ -163,29 +183,18 @@ func GetClaims(c *gin.Context) *jwtpkg.Claims {
 	return claims
 }
 
-// roleLevel trả về cấp bậc của role
 func roleLevel(r jwtpkg.Role) int {
 	switch r {
-	case jwtpkg.RoleSuperAdmin:
-		return 8
-	case jwtpkg.RoleNationalManager:
-		return 7
-	case jwtpkg.RoleProvinceManager:
-		return 6
-	case jwtpkg.RoleDistrictManager:
-		return 5
-	case jwtpkg.RoleWardOfficer:
-		return 4
-	case jwtpkg.RoleDataEntry:
-		return 3
-	case jwtpkg.RoleAuditor:
-		return 3
-	case jwtpkg.RoleAnalyticsViewer:
-		return 2
-	case jwtpkg.RoleCitizenSelf:
-		return 1
-	default:
-		return 0
+	case jwtpkg.RoleSuperAdmin:      return 8
+	case jwtpkg.RoleNationalManager: return 7
+	case jwtpkg.RoleProvinceManager: return 6
+	case jwtpkg.RoleDistrictManager: return 5
+	case jwtpkg.RoleWardOfficer:     return 4
+	case jwtpkg.RoleDataEntry:       return 3
+	case jwtpkg.RoleAuditor:         return 3
+	case jwtpkg.RoleAnalyticsViewer: return 2
+	case jwtpkg.RoleCitizenSelf:     return 1
+	default:                          return 0
 	}
 }
 

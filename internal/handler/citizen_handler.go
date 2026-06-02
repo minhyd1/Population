@@ -3,7 +3,7 @@ package handler
 import (
 	"net/http"
 	"population-service/internal/model"
-	"population-service/internal/service"
+	citizensvc "population-service/internal/service/citizen"
 	"population-service/pkg/response"
 	"strings"
 
@@ -11,10 +11,10 @@ import (
 )
 
 type CitizenHandler struct {
-	svc service.CitizenService
+	svc citizensvc.Service
 }
 
-func NewCitizenHandler(svc service.CitizenService) *CitizenHandler {
+func NewCitizenHandler(svc citizensvc.Service) *CitizenHandler {
 	return &CitizenHandler{svc: svc}
 }
 

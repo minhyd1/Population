@@ -81,15 +81,33 @@ func (h *AuthHandler) Me(c *gin.Context) {
 // POST /auth/logout
 func (h *AuthHandler) Logout(c *gin.Context) {
 	var req model.RefreshRequest
+
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "VALIDATION_ERROR", err.Error())
 		return
 	}
-	if err := h.authSvc.Logout(c.Request.Context(), req.RefreshToken); err != nil {
+
+	claims := middleware.GetClaims(c)
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"success": false,
+			"error":   "unauthorized",
+		})
+		return
+	}
+
+	if err := h.authSvc.Logout(
+		c.Request.Context(),
+		req.RefreshToken,
+		claims.ID, // JTI của access token
+	); err != nil {
 		response.InternalError(c, err.Error())
 		return
 	}
-	response.OK(c, gin.H{"message": "logged out successfully"})
+
+	response.OK(c, gin.H{
+		"message": "logged out successfully",
+	})
 }
 
 // POST /auth/logout-all

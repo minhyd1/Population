@@ -5,31 +5,30 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 // Role định nghĩa vai trò người dùng — 9 role theo đặc tả
 type Role string
 
 const (
-	RoleSuperAdmin       Role = "super_admin"
-	RoleNationalManager  Role = "national_manager"
-	RoleProvinceManager  Role = "province_manager"
-	RoleDistrictManager  Role = "district_manager"
-	RoleWardOfficer      Role = "ward_officer"
-	RoleDataEntry        Role = "data_entry"
-	RoleAuditor          Role = "auditor"
-	RoleAnalyticsViewer  Role = "analytics_viewer"
-	RoleCitizenSelf      Role = "citizen_self"
+	RoleSuperAdmin      Role = "super_admin"
+	RoleNationalManager Role = "national_manager"
+	RoleProvinceManager Role = "province_manager"
+	RoleDistrictManager Role = "district_manager"
+	RoleWardOfficer     Role = "ward_officer"
+	RoleDataEntry       Role = "data_entry"
+	RoleAuditor         Role = "auditor"
+	RoleAnalyticsViewer Role = "analytics_viewer"
+	RoleCitizenSelf     Role = "citizen_self"
 )
 
-// AllRoles là danh sách toàn bộ role hợp lệ — dùng để validate trong register
 var AllRoles = []Role{
 	RoleSuperAdmin, RoleNationalManager, RoleProvinceManager,
 	RoleDistrictManager, RoleWardOfficer, RoleDataEntry,
 	RoleAuditor, RoleAnalyticsViewer, RoleCitizenSelf,
 }
 
-// IsValid kiểm tra role có hợp lệ không
 func (r Role) IsValid() bool {
 	for _, v := range AllRoles {
 		if r == v {
@@ -39,17 +38,17 @@ func (r Role) IsValid() bool {
 	return false
 }
 
-// Claims là payload bên trong JWT token.
-// Ngoài role, lưu thêm province/district/ward code để middleware
-// lọc dữ liệu theo địa bàn mà không cần query DB mỗi request.
+// Claims là payload bên trong JWT.
+// ID (JTI) là UUID duy nhất mỗi token — dùng để blacklist khi logout.
 type Claims struct {
 	UserID       string `json:"user_id"`
 	Username     string `json:"username"`
 	Role         Role   `json:"role"`
-	ProvinceCode string `json:"province_code,omitempty"` // dùng cho province_manager
-	DistrictCode string `json:"district_code,omitempty"` // dùng cho district_manager
-	WardCode     string `json:"ward_code,omitempty"`     // dùng cho ward_officer
+	ProvinceCode string `json:"province_code,omitempty"`
+	DistrictCode string `json:"district_code,omitempty"`
+	WardCode     string `json:"ward_code,omitempty"`
 	jwt.RegisteredClaims
+	// RegisteredClaims.ID = JTI (JWT ID) — unique per token
 }
 
 // Manager quản lý việc tạo và xác thực JWT
@@ -78,6 +77,7 @@ func (m *Manager) GenerateAccessToken(userID, username string, role Role, provin
 		DistrictCode: districtCode,
 		WardCode:     wardCode,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.New().String(), // JTI — dùng để blacklist
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(m.accessTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "population-service",
@@ -96,6 +96,7 @@ func (m *Manager) GenerateRefreshToken(userID, username string, role Role, provi
 		DistrictCode: districtCode,
 		WardCode:     wardCode,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        uuid.New().String(),
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(m.refreshTTL)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "population-service",
@@ -103,6 +104,11 @@ func (m *Manager) GenerateRefreshToken(userID, username string, role Role, provi
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(m.refreshSecret)
+}
+
+// AccessTTL trả về TTL của access token — dùng để tính thời gian blacklist
+func (m *Manager) AccessTTL() time.Duration {
+	return m.accessTTL
 }
 
 func (m *Manager) ValidateAccessToken(tokenStr string) (*Claims, error) {

@@ -1,10 +1,14 @@
 version: '3.8'
+
 services:
   api:
     build:
       context: ..
       dockerfile: deployments/Dockerfile
     container_name: population-api
+    depends_on:
+      redis:
+        condition: service_healthy
     environment:
       APP_PORT: 8080
       APP_ENV: development
@@ -15,6 +19,35 @@ services:
       DB_NAME: population_db
       DB_SSLMODE: disable
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=}
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-your-access-secret-key}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-your-refresh-secret-key}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: 0
+      REDIS_ENABLED: "true"
     ports:
       - "8080:8080"
     restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: population-redis
+    command: >
+      redis-server
+      --save 60 1
+      --loglevel warning
+      ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  redis_data:
