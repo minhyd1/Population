@@ -22,6 +22,8 @@ type CitizenRepository interface {
 	GetPopulationStatsByProvince(ctx context.Context) ([]*model.PopulationStat, error)
 	GetPopulationStatByProvince(ctx context.Context, provinceCode string) (*model.PopulationStat, error)
 	ExistsByNationalID(ctx context.Context, nationalID string, excludeID string) (bool, error)
+	// UpdateResidence cập nhật địa bàn cư trú sau khi chuyển hộ khẩu
+	UpdateResidence(ctx context.Context, citizenID, provinceCode, districtCode, wardCode string) error
 }
 
 type citizenRepo struct {
@@ -269,4 +271,14 @@ func (r *citizenRepo) ExistsByNationalID(ctx context.Context, nationalID string,
 	}
 
 	return exists, err
+}
+
+// UpdateResidence cập nhật địa bàn cư trú của công dân sau khi chuyển hộ khẩu
+func (r *citizenRepo) UpdateResidence(ctx context.Context, citizenID, provinceCode, districtCode, wardCode string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE citizens
+		SET province_code=$1, district_code=$2, ward_code=$3, updated_at=NOW()
+		WHERE id=$4 AND deleted_at IS NULL`,
+		provinceCode, districtCode, wardCode, citizenID)
+	return err
 }

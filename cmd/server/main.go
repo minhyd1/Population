@@ -63,18 +63,22 @@ func main() {
 	provinceRepo := repository.NewProvinceRepository(db)
 	userRepo     := repository.NewUserRepository(db)
 	auditRepo    := repository.NewAuditRepository(db)
+	householdRepo := repository.NewHouseholdRepository(db)
+	transferRepo  := repository.NewTransferRepository(db)
 
 	// ── Services ──────────────────────────────────────────────
 	// NewAuthService nhận Redis optional — nếu nil, Logout vẫn hoạt động
 	// nhưng không blacklist access token
-	citizenSvc := citizensvc.New(citizenRepo, provinceRepo, auditRepo, enc)
-	authSvc    := service.NewAuthService(userRepo, jwtManager, redisClient)
-	auditSvc   := service.NewAuditService(auditRepo)
+	citizenSvc  := citizensvc.New(citizenRepo, provinceRepo, auditRepo, enc)
+	authSvc     := service.NewAuthService(userRepo, jwtManager, redisClient)
+	auditSvc    := service.NewAuditService(auditRepo)
+	transferSvc := service.NewTransferService(db, transferRepo, householdRepo, citizenRepo, auditRepo)
 
 	// ── Handlers ──────────────────────────────────────────────
-	citizenHandler := handler.NewCitizenHandler(citizenSvc)
-	authHandler    := handler.NewAuthHandler(authSvc)
-	auditHandler   := handler.NewAuditHandler(auditSvc)
+	citizenHandler  := handler.NewCitizenHandler(citizenSvc)
+	authHandler     := handler.NewAuthHandler(authSvc)
+	auditHandler    := handler.NewAuditHandler(auditSvc)
+	transferHandler := handler.NewTransferHandler(transferSvc)
 
 	if cfg.AppEnv == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -210,6 +214,76 @@ func main() {
 			jwtpkg.RoleNationalManager,
 			jwtpkg.RoleAuditor,
 		), withRL(limiter, ratelimit.RuleAPI, "audit"), auditHandler.List)
+
+		// ── /households ───────────────────────────────────────
+		households := protected.Group("/households")
+		households.Use(middleware.RequireScopeMatch())
+		{
+			households.GET("", middleware.RequireRole(
+				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
+				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
+				jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor,
+			), withRL(limiter, ratelimit.RuleAPI, "households_read"), transferHandler.ListHouseholds)
+
+			households.GET("/:id", middleware.RequireRole(
+				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
+				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
+				jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor,
+			), withRL(limiter, ratelimit.RuleAPI, "households_read"), transferHandler.GetHousehold)
+
+			households.POST("", middleware.RequireRole(
+				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
+				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
+				jwtpkg.RoleWardOfficer,
+			), withRL(limiter, ratelimit.RuleWrite, "households_write"), transferHandler.CreateHousehold)
+
+			households.POST("/:id/members", middleware.RequireRole(
+				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
+				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
+				jwtpkg.RoleWardOfficer,
+			), withRL(limiter, ratelimit.RuleWrite, "households_write"), transferHandler.AddHouseholdMember)
+		}
+
+		// ── /transfers ────────────────────────────────────────
+		transfers := protected.Group("/transfers")
+		{
+			// Xem danh sách yêu cầu: các cán bộ địa bàn và auditor
+			transfers.GET("", middleware.RequireRole(
+				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
+				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
+				jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor,
+			), withRL(limiter, ratelimit.RuleAPI, "transfers_read"), transferHandler.ListTransfers)
+
+			transfers.GET("/:id", middleware.RequireRole(
+				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
+				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
+				jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor, jwtpkg.RoleCitizenSelf,
+			), withRL(limiter, ratelimit.RuleAPI, "transfers_read"), transferHandler.GetTransfer)
+
+			// Tạo yêu cầu chuyển hộ khẩu
+			transfers.POST("", middleware.RequireRole(
+				jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
+				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
+				jwtpkg.RoleWardOfficer, jwtpkg.RoleDataEntry,
+			), withRL(limiter, ratelimit.RuleWrite, "transfers_write"), transferHandler.CreateTransfer)
+
+			// Phê duyệt/từ chối (cán bộ địa bàn liên quan)
+			transfers.POST("/:id/approve", middleware.RequireRole(
+				jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager, jwtpkg.RoleWardOfficer,
+			), withRL(limiter, ratelimit.RuleWrite, "transfers_write"), transferHandler.ApproveTransfer)
+
+			// Force approve: chỉ super_admin, ghi audit log riêng
+			transfers.POST("/:id/force-approve", middleware.RequireRole(
+				jwtpkg.RoleSuperAdmin,
+			), withRL(limiter, ratelimit.RuleWrite, "transfers_write"), transferHandler.ForceApproveTransfer)
+		}
+
+		// ── Lịch sử cư trú ────────────────────────────────────
+		citizens.GET("/:id/residence-history", middleware.RequireRole(
+			jwtpkg.RoleSuperAdmin, jwtpkg.RoleNationalManager,
+			jwtpkg.RoleProvinceManager, jwtpkg.RoleDistrictManager,
+			jwtpkg.RoleWardOfficer, jwtpkg.RoleAuditor, jwtpkg.RoleCitizenSelf,
+		), withRL(limiter, ratelimit.RuleAPI, "citizens_read"), transferHandler.GetResidenceHistory)
 	}
 
 	addr := fmt.Sprintf(":%s", cfg.AppPort)
