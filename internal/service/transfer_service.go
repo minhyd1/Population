@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	jwtpkg "population-service/pkg/jwt"
 	"population-service/internal/model"
@@ -30,6 +32,9 @@ type TransferService interface {
 
 	// Residence History
 	GetResidenceHistory(ctx context.Context, citizenID string) ([]*model.ResidenceHistoryResponse, error)
+
+	// Vấn đề 4: Escalation
+	EscalateExpiredRequests(ctx context.Context) (int, error)
 }
 
 type transferSvc struct {
@@ -89,7 +94,6 @@ func (s *transferSvc) GetHousehold(ctx context.Context, id string) (*model.House
 
 func (s *transferSvc) ListHouseholds(ctx context.Context, filter model.ListHouseholdFilter) (*model.HouseholdListResponse, error) {
 	claims := claimsFromCtx(ctx)
-	// Tự động giới hạn scope theo role
 	if claims != nil {
 		switch claims.Role {
 		case jwtpkg.RoleWardOfficer:
@@ -155,6 +159,21 @@ func (s *transferSvc) CreateTransferRequest(ctx context.Context, req model.Creat
 		return nil, fmt.Errorf("to_household not found: %w", err)
 	}
 
+	// ─── Vấn đề 5: Household Ownership Validation ───────────
+	// Kiểm tra citizen có thực sự thuộc from_household không
+	actualHH, err := s.householdRepo.GetMemberHousehold(ctx, req.CitizenID)
+	if err != nil {
+		// Nếu không tìm thấy household → citizen chưa thuộc hộ nào
+		return nil, fmt.Errorf("citizen_id=%s không thuộc hộ khẩu nào: %w", req.CitizenID, err)
+	}
+	if actualHH.ID != req.FromHouseholdID {
+		return nil, fmt.Errorf(
+			"công dân hiện thuộc hộ %s (household_no=%s), không phải hộ %s — 400 Bad Request",
+			actualHH.ID, actualHH.HouseholdNo, req.FromHouseholdID,
+		)
+	}
+	// ─────────────────────────────────────────────────────────
+
 	level := determineApprovalLevel(fromHH, toHH)
 
 	claims := claimsFromCtx(ctx)
@@ -163,10 +182,17 @@ func (s *transferSvc) CreateTransferRequest(ctx context.Context, req model.Creat
 		createdBy = claims.UserID
 	}
 
+	// Snapshot unit_code tại thời điểm tạo — bất biến (điểm 3: transfer snapshot)
+	// Nếu household sau này đổi địa chỉ / ward_code, lịch sử request vẫn chính xác
+	fromUnitCode := fromHH.WardCode
+	toUnitCode := toHH.WardCode
+
 	treq := &model.TransferRequest{
 		CitizenID:       req.CitizenID,
 		FromHouseholdID: req.FromHouseholdID,
 		ToHouseholdID:   req.ToHouseholdID,
+		FromUnitCode:    &fromUnitCode,
+		ToUnitCode:      &toUnitCode,
 		ApprovalLevel:   level,
 		Status:          model.TransferStatusPending,
 		Reason:          req.Reason,
@@ -215,7 +241,7 @@ func (s *transferSvc) GetTransferRequest(ctx context.Context, id string) (*model
 func (s *transferSvc) ListTransferRequests(ctx context.Context, filter model.ListTransferFilter) (*model.TransferListResponse, error) {
 	claims := claimsFromCtx(ctx)
 	if claims != nil {
-		// Tự động giới hạn scope
+		// Vấn đề 3: enforce scope tại Service → Repository cũng enforce
 		switch claims.Role {
 		case jwtpkg.RoleWardOfficer:
 			filter.WardCode = claims.WardCode
@@ -251,17 +277,10 @@ func (s *transferSvc) ListTransferRequests(ctx context.Context, filter model.Lis
 }
 
 // ApproveTransfer cho phép cán bộ phụ trách đơn vị duyệt/từ chối
+// Vấn đề 3: Enforce ở cả Repository (HasApprovalForUnit) + Vấn đề 6: SELECT FOR UPDATE
 func (s *transferSvc) ApproveTransfer(ctx context.Context, requestID string, req model.ApproveTransferRequest) error {
 	if req.Decision == model.ApprovalDecisionRejected && req.RejectReason == "" {
 		return fmt.Errorf("reject_reason bắt buộc khi từ chối")
-	}
-
-	treq, err := s.transferRepo.GetRequestByID(ctx, requestID)
-	if err != nil {
-		return fmt.Errorf("transfer request not found: %w", err)
-	}
-	if treq.Status != model.TransferStatusPending {
-		return fmt.Errorf("yêu cầu không ở trạng thái pending")
 	}
 
 	claims := claimsFromCtx(ctx)
@@ -275,40 +294,61 @@ func (s *transferSvc) ApproveTransfer(ctx context.Context, requestID string, req
 		return fmt.Errorf("user không có địa bàn phụ trách")
 	}
 
-	approval, err := s.transferRepo.GetPendingApprovalForUnit(ctx, requestID, unitCode)
+	// Vấn đề 3: Kiểm tra sớm tại Repository — unit có phiếu duyệt trong request này không?
+	// (Tránh truy vấn thông tin request cho đơn vị không liên quan)
+	hasApproval, err := s.transferRepo.HasApprovalForUnit(ctx, requestID, unitCode)
 	if err != nil {
-		return fmt.Errorf("không tìm thấy phiếu phê duyệt cho đơn vị %s: %w", unitCode, err)
+		return fmt.Errorf("kiểm tra quyền duyệt: %w", err)
+	}
+	if !hasApproval {
+		return fmt.Errorf("forbidden: đơn vị %s không có phiếu duyệt cho request này", unitCode)
 	}
 
-	approval.Decision = req.Decision
-	approval.ApprovedBy = &claims.UserID
-	if req.RejectReason != "" {
-		approval.RejectReason = &req.RejectReason
-	}
-
-	if err := s.transferRepo.UpdateApproval(ctx, approval); err != nil {
-		return fmt.Errorf("update approval: %w", err)
-	}
-
-	// Kiểm tra tất cả đã duyệt chưa
-	if req.Decision == model.ApprovalDecisionApproved {
-		allApprovals, err := s.transferRepo.GetApprovalsByRequestID(ctx, requestID)
+	// Vấn đề 6: Toàn bộ logic approve chạy trong transaction với SELECT FOR UPDATE
+	return s.transferRepo.WithTx(ctx, func(txRepo repository.TransferRepository) error {
+		// SELECT FOR UPDATE — chặn Ward A và Ward B cùng trigger executeTransfer
+		treq, err := txRepo.GetRequestByIDForUpdate(ctx, requestID)
 		if err != nil {
-			return err
+			return fmt.Errorf("transfer request not found: %w", err)
 		}
-		if checkAllApproved(allApprovals) {
-			fromHH, err := s.householdRepo.GetByID(ctx, treq.FromHouseholdID)
+		if treq.Status != model.TransferStatusPending {
+			return fmt.Errorf("yêu cầu không ở trạng thái pending (hiện tại: %s)", treq.Status)
+		}
+
+		approval, err := txRepo.GetPendingApprovalForUnit(ctx, requestID, unitCode)
+		if err != nil {
+			return fmt.Errorf("không tìm thấy phiếu phê duyệt cho đơn vị %s: %w", unitCode, err)
+		}
+
+		approval.Decision = req.Decision
+		approval.ApprovedBy = &claims.UserID
+		if req.RejectReason != "" {
+			approval.RejectReason = &req.RejectReason
+		}
+
+		if err := txRepo.UpdateApproval(ctx, approval); err != nil {
+			return fmt.Errorf("update approval: %w", err)
+		}
+
+		if req.Decision == model.ApprovalDecisionApproved {
+			allApprovals, err := txRepo.GetApprovalsByRequestID(ctx, requestID)
 			if err != nil {
 				return err
 			}
-			return s.executeTransfer(ctx, treq, fromHH)
+			if checkAllApproved(allApprovals) {
+				fromHH, err := s.householdRepo.GetByID(ctx, treq.FromHouseholdID)
+				if err != nil {
+					return err
+				}
+				// executeTransfer cần repo riêng vì đang trong transaction
+				return s.executeTransferInTx(ctx, txRepo, treq, fromHH)
+			}
+		} else if req.Decision == model.ApprovalDecisionRejected {
+			return txRepo.UpdateRequestStatus(ctx, requestID, model.TransferStatusRejected)
 		}
-	} else if req.Decision == model.ApprovalDecisionRejected {
-		// Một bên từ chối → toàn bộ yêu cầu bị từ chối
-		return s.transferRepo.UpdateRequestStatus(ctx, requestID, model.TransferStatusRejected)
-	}
 
-	return nil
+		return nil
+	})
 }
 
 // ForceApproveTransfer dành cho super_admin override trong tình huống khẩn cấp
@@ -331,13 +371,16 @@ func (s *transferSvc) ForceApproveTransfer(ctx context.Context, requestID string
 		return err
 	}
 
-	// Ghi audit log đặc biệt với action FORCE_APPROVE
+	logID := uuid.New().String()
+	now := time.Now()
 	_ = s.auditRepo.Insert(ctx, &model.AuditLog{
+		ID:            logID,
 		CitizenID:     treq.CitizenID,
 		Action:        model.AuditAction("force_approve_transfer"),
 		ChangedBy:     claims.UserID,
 		ChangedByName: claims.Username,
 		ChangedByRole: string(claims.Role),
+		ChangedAt:     now,
 	})
 
 	return s.executeTransfer(ctx, treq, fromHH)
@@ -366,91 +409,191 @@ func (s *transferSvc) GetResidenceHistory(ctx context.Context, citizenID string)
 	return resp, nil
 }
 
+// ─── Vấn đề 4: Escalation Cron ─────────────────────────────
+
+// EscalateExpiredRequests tìm tất cả request quá hạn 7 ngày và escalate lên cấp trên.
+// Được gọi bởi cron job (ví dụ: mỗi giờ).
+// Trả về số lượng request đã được escalate.
+func (s *transferSvc) EscalateExpiredRequests(ctx context.Context) (int, error) {
+	expired, err := s.transferRepo.ListExpiredPending(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list expired: %w", err)
+	}
+
+	count := 0
+	for _, treq := range expired {
+		escalateTo, err := s.determineEscalationTarget(ctx, treq)
+		if err != nil || escalateTo == "" {
+			continue
+		}
+
+		if err := s.transferRepo.EscalateRequest(ctx, treq.ID, escalateTo); err != nil {
+			continue
+		}
+
+		// Tạo approval mới cho cấp escalated
+		_ = s.transferRepo.CreateApprovals(ctx, []*model.TransferApproval{
+			{RequestID: treq.ID, UnitCode: escalateTo, UnitRole: "escalated"},
+		})
+
+		// Ghi audit log cho escalation
+		logID := uuid.New().String()
+		now := time.Now()
+		_ = s.auditRepo.Insert(ctx, &model.AuditLog{
+			ID:            logID,
+			CitizenID:     treq.CitizenID,
+			Action:        model.AuditAction("transfer_escalated"),
+			ChangedBy:     "system",
+			ChangedByName: "cron",
+			ChangedByRole: "system",
+			ChangedAt:     now,
+		})
+
+		count++
+	}
+	return count, nil
+}
+
+// determineEscalationTarget xác định unit_code cấp trên để escalate
+// Dựa trên approval_level của request
+func (s *transferSvc) determineEscalationTarget(ctx context.Context, treq *model.TransferRequest) (string, error) {
+	fromHH, err := s.householdRepo.GetByID(ctx, treq.FromHouseholdID)
+	if err != nil {
+		return "", err
+	}
+	switch treq.ApprovalLevel {
+	case model.ApprovalLevelWard:
+		// Ward không duyệt → escalate lên District
+		return fromHH.DistrictCode, nil
+	case model.ApprovalLevelDistrict:
+		// District không duyệt → escalate lên Province
+		return fromHH.ProvinceCode, nil
+	case model.ApprovalLevelProvince:
+		// Province không duyệt → không có cấp trên, đây là max
+		return "", nil
+	}
+	return "", nil
+}
+
 // ─── ExecuteTransfer (Transaction) ─────────────────────────
 
-// executeTransfer thực hiện chuyển hộ khẩu trong một transaction duy nhất:
-// 1. Ghi residence_histories
-// 2. Xóa khỏi hộ cũ
-// 3. Thêm vào hộ mới
-// 4. Cập nhật citizen (ward/district/province)
-// 5. Cập nhật request status = completed
-// 6. Ghi audit log
+// executeTransfer — gọi từ bên ngoài transaction (ForceApprove, ApprovalLevelNone)
 func (s *transferSvc) executeTransfer(ctx context.Context, treq *model.TransferRequest, fromHH *model.Household) error {
+	return s.transferRepo.WithTx(ctx, func(txRepo repository.TransferRepository) error {
+		return s.executeTransferInTx(ctx, txRepo, treq, fromHH)
+	})
+}
+
+// executeTransferInTx — gọi từ bên trong transaction đang có (ApproveTransfer)
+// Tách ra để tránh nested transaction
+func (s *transferSvc) executeTransferInTx(
+	ctx context.Context,
+	txRepo repository.TransferRepository,
+	treq *model.TransferRequest,
+	fromHH *model.Household,
+) error {
 	toHH, err := s.householdRepo.GetByID(ctx, treq.ToHouseholdID)
 	if err != nil {
 		return err
 	}
 
-	return s.transferRepo.WithTx(ctx, func(txRepo repository.TransferRepository) error {
-		// 1. Residence History
-		requestID := treq.ID
-		history := &model.ResidenceHistory{
-			CitizenID:         treq.CitizenID,
-			FromHouseholdID:   &treq.FromHouseholdID,
-			ToHouseholdID:     treq.ToHouseholdID,
-			TransferRequestID: &requestID,
-			Reason:            treq.Reason,
-		}
-		if err := txRepo.CreateResidenceHistory(ctx, history); err != nil {
-			return fmt.Errorf("residence history: %w", err)
-		}
+	// 1. Residence History
+	requestID := treq.ID
+	history := &model.ResidenceHistory{
+		CitizenID:         treq.CitizenID,
+		FromHouseholdID:   &treq.FromHouseholdID,
+		ToHouseholdID:     treq.ToHouseholdID,
+		TransferRequestID: &requestID,
+		Reason:            treq.Reason,
+	}
+	if err := txRepo.CreateResidenceHistory(ctx, history); err != nil {
+		return fmt.Errorf("residence history: %w", err)
+	}
 
-		// 2. Xóa khỏi hộ cũ
-		if err := s.householdRepo.RemoveMember(ctx, treq.FromHouseholdID, treq.CitizenID); err != nil {
-			return fmt.Errorf("remove member: %w", err)
+	// 2. Xóa khỏi hộ cũ
+	if err := s.householdRepo.RemoveMember(ctx, treq.FromHouseholdID, treq.CitizenID); err != nil {
+		return fmt.Errorf("remove member: %w", err)
+	}
+
+	// 3. Thêm vào hộ mới
+	if err := s.householdRepo.AddMember(ctx, &model.HouseholdMember{
+		HouseholdID:  treq.ToHouseholdID,
+		CitizenID:    treq.CitizenID,
+		Relationship: "thành viên",
+	}); err != nil {
+		return fmt.Errorf("add member: %w", err)
+	}
+
+	// 4. Cập nhật địa chỉ công dân theo hộ mới
+	if err := s.citizenRepo.UpdateResidence(ctx, treq.CitizenID,
+		toHH.ProvinceCode, toHH.DistrictCode, toHH.WardCode); err != nil {
+		return fmt.Errorf("update citizen residence: %w", err)
+	}
+
+	// 5. Cập nhật request status = completed
+	if err := txRepo.CompleteRequest(ctx, treq.ID); err != nil {
+		return fmt.Errorf("complete request: %w", err)
+	}
+
+	// 6. Audit log với visibility
+	// Vấn đề 2: Ward A, Ward B, District A, District B, Province A đều thấy
+	visibilityUnits := buildAuditVisibility(fromHH, toHH)
+	logID := uuid.New().String()
+	now := time.Now()
+	auditLog := &model.AuditLog{
+		ID:            logID,
+		CitizenID:     treq.CitizenID,
+		Action:        model.AuditAction("transfer_completed"),
+		ChangedBy:     treq.CreatedBy,
+		ChangedByName: "system",
+		ChangedByRole: "transfer_workflow",
+		ChangedAt:     now,
+	}
+	_ = s.auditRepo.InsertWithVisibility(ctx, auditLog, visibilityUnits)
+
+	_ = fromHH // used for reference
+	return nil
+}
+
+// buildAuditVisibility sinh danh sách unit_code được phép xem audit log
+// của một operation chuyển hộ khẩu.
+// Vấn đề 2: Ward A, Ward B, District A, District B, Province A được xem.
+// Ward C không được xem.
+func buildAuditVisibility(from, to *model.Household) []string {
+	seen := map[string]bool{}
+	var units []string
+	add := func(code string) {
+		if code != "" && !seen[code] {
+			seen[code] = true
+			units = append(units, code)
 		}
-
-		// 3. Thêm vào hộ mới (quan hệ mặc định là "thành viên")
-		if err := s.householdRepo.AddMember(ctx, &model.HouseholdMember{
-			HouseholdID:  treq.ToHouseholdID,
-			CitizenID:    treq.CitizenID,
-			Relationship: "thành viên",
-		}); err != nil {
-			return fmt.Errorf("add member: %w", err)
-		}
-
-		// 4. Cập nhật địa chỉ công dân theo hộ mới
-		if err := s.citizenRepo.UpdateResidence(ctx, treq.CitizenID,
-			toHH.ProvinceCode, toHH.DistrictCode, toHH.WardCode); err != nil {
-			return fmt.Errorf("update citizen residence: %w", err)
-		}
-
-		// 5. Cập nhật request
-		if err := txRepo.CompleteRequest(ctx, treq.ID); err != nil {
-			return fmt.Errorf("complete request: %w", err)
-		}
-
-		// 6. Audit log
-		_ = s.auditRepo.Insert(ctx, &model.AuditLog{
-			CitizenID:     treq.CitizenID,
-			Action:        model.AuditAction("transfer_completed"),
-			ChangedBy:     treq.CreatedBy,
-			ChangedByName: "system",
-			ChangedByRole: "transfer_workflow",
-		})
-
-		_ = fromHH // used for reference
-		return nil
-	})
+	}
+	// Từ nơi đi: ward, district, province
+	add(from.WardCode)
+	add(from.DistrictCode)
+	add(from.ProvinceCode)
+	// Từ nơi đến: ward, district, province
+	add(to.WardCode)
+	add(to.DistrictCode)
+	add(to.ProvinceCode)
+	return units
 }
 
 // ─── Helpers ────────────────────────────────────────────────
 
-// determineApprovalLevel tự động xác định cấp phê duyệt cần thiết
 func determineApprovalLevel(from, to *model.Household) model.ApprovalLevel {
 	if from.WardCode == to.WardCode {
-		return model.ApprovalLevelNone // cùng phường → không cần workflow
+		return model.ApprovalLevelNone
 	}
 	if from.DistrictCode == to.DistrictCode {
-		return model.ApprovalLevelWard // khác phường cùng quận → cần 2 phường duyệt
+		return model.ApprovalLevelWard
 	}
 	if from.ProvinceCode == to.ProvinceCode {
-		return model.ApprovalLevelDistrict // khác quận cùng tỉnh → cần 2 quận duyệt
+		return model.ApprovalLevelDistrict
 	}
-	return model.ApprovalLevelProvince // khác tỉnh → cần 2 tỉnh duyệt
+	return model.ApprovalLevelProvince
 }
 
-// buildApprovals sinh danh sách phiếu phê duyệt theo cấp
 func buildApprovals(requestID string, from, to *model.Household, level model.ApprovalLevel) []*model.TransferApproval {
 	var approvals []*model.TransferApproval
 	switch level {
@@ -473,7 +616,6 @@ func buildApprovals(requestID string, from, to *model.Household, level model.App
 	return approvals
 }
 
-// checkAllApproved kiểm tra tất cả phiếu phê duyệt đã được duyệt chưa
 func checkAllApproved(approvals []*model.TransferApproval) bool {
 	for _, a := range approvals {
 		if a.Decision != model.ApprovalDecisionApproved {
@@ -483,7 +625,6 @@ func checkAllApproved(approvals []*model.TransferApproval) bool {
 	return len(approvals) > 0
 }
 
-// getUnitCode lấy unit code phù hợp với role của user
 func getUnitCode(claims *jwtpkg.Claims) string {
 	switch claims.Role {
 	case jwtpkg.RoleWardOfficer:
@@ -496,7 +637,6 @@ func getUnitCode(claims *jwtpkg.Claims) string {
 	return ""
 }
 
-// canManageUnit kiểm tra user có quyền quản lý đơn vị hành chính này không
 func canManageUnit(claims *jwtpkg.Claims, wardCode, districtCode, provinceCode string) error {
 	if claims.Role == jwtpkg.RoleSuperAdmin || claims.Role == jwtpkg.RoleNationalManager {
 		return nil
@@ -518,21 +658,34 @@ func canManageUnit(claims *jwtpkg.Claims, wardCode, districtCode, provinceCode s
 	return nil
 }
 
-// canViewTransfer kiểm tra user có quyền xem yêu cầu chuyển hộ không
+// canViewTransfer — Vấn đề 2 & 3: kiểm tra quyền xem request dựa trên approval_visibility
 func (s *transferSvc) canViewTransfer(ctx context.Context, claims *jwtpkg.Claims, treq *model.TransferRequest) error {
 	if claims.Role == jwtpkg.RoleSuperAdmin || claims.Role == jwtpkg.RoleNationalManager ||
 		claims.Role == jwtpkg.RoleAuditor {
 		return nil
 	}
-	// Kiểm tra hộ nơi đi hoặc nơi đến có trong địa bàn của user không
+
+	unitCode := getUnitCode(claims)
+	if unitCode == "" {
+		if claims.Role == jwtpkg.RoleCitizenSelf && treq.CitizenID == claims.UserID {
+			return nil
+		}
+		return fmt.Errorf("forbidden: không có quyền xem yêu cầu này")
+	}
+
+	// Vấn đề 3: Kiểm tra tại Repository — unit có approval trong request này không?
+	hasApproval, err := s.transferRepo.HasApprovalForUnit(ctx, treq.ID, unitCode)
+	if err != nil {
+		return fmt.Errorf("kiểm tra quyền xem: %w", err)
+	}
+	if hasApproval {
+		return nil
+	}
+
+	// District Manager / Province Manager: cũng có thể xem nếu household thuộc địa bàn
 	fromHH, _ := s.householdRepo.GetByID(ctx, treq.FromHouseholdID)
 	toHH, _ := s.householdRepo.GetByID(ctx, treq.ToHouseholdID)
 	switch claims.Role {
-	case jwtpkg.RoleWardOfficer:
-		if (fromHH != nil && fromHH.WardCode == claims.WardCode) ||
-			(toHH != nil && toHH.WardCode == claims.WardCode) {
-			return nil
-		}
 	case jwtpkg.RoleDistrictManager:
 		if (fromHH != nil && fromHH.DistrictCode == claims.DistrictCode) ||
 			(toHH != nil && toHH.DistrictCode == claims.DistrictCode) {
@@ -543,11 +696,8 @@ func (s *transferSvc) canViewTransfer(ctx context.Context, claims *jwtpkg.Claims
 			(toHH != nil && toHH.ProvinceCode == claims.ProvinceCode) {
 			return nil
 		}
-	case jwtpkg.RoleCitizenSelf:
-		if treq.CitizenID == claims.UserID { // so sánh citizen_id
-			return nil
-		}
 	}
+
 	return fmt.Errorf("forbidden: không có quyền xem yêu cầu này")
 }
 
@@ -577,6 +727,8 @@ func (s *transferSvc) buildTransferResponse(ctx context.Context, req *model.Tran
 		CreatedAt:       req.CreatedAt,
 		UpdatedAt:       req.UpdatedAt,
 		CompletedAt:     req.CompletedAt,
+		DeadlineAt:      req.DeadlineAt,
+		EscalatedTo:     req.EscalatedTo,
 		Approvals:       appResp,
 	}, nil
 }
@@ -602,7 +754,6 @@ func toHouseholdResponse(h *model.Household, members []*model.HouseholdMember) *
 	return resp
 }
 
-// claimsFromCtx lấy JWT claims từ context (được inject bởi middleware)
 func claimsFromCtx(ctx context.Context) *jwtpkg.Claims {
 	userID, _ := ctx.Value(middleware.ContextKeyUserID).(string)
 	if userID == "" {
@@ -610,9 +761,15 @@ func claimsFromCtx(ctx context.Context) *jwtpkg.Claims {
 	}
 	role, _ := ctx.Value(middleware.ContextKeyUserRole).(string)
 	username, _ := ctx.Value(middleware.ContextKeyUsername).(string)
+	wardCode, _ := ctx.Value(middleware.ContextKeyWardCode).(string)
+	districtCode, _ := ctx.Value(middleware.ContextKeyDistrictCode).(string)
+	provinceCode, _ := ctx.Value(middleware.ContextKeyProvinceCode).(string)
 	return &jwtpkg.Claims{
-		UserID:   userID,
-		Username: username,
-		Role:     jwtpkg.Role(role),
+		UserID:       userID,
+		Username:     username,
+		Role:         jwtpkg.Role(role),
+		WardCode:     wardCode,
+		DistrictCode: districtCode,
+		ProvinceCode: provinceCode,
 	}
 }

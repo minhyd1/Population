@@ -59,26 +59,29 @@ func main() {
 	}
 
 	// ── Repositories ──────────────────────────────────────────
-	citizenRepo  := repository.NewCitizenRepository(db)
-	provinceRepo := repository.NewProvinceRepository(db)
-	userRepo     := repository.NewUserRepository(db)
-	auditRepo    := repository.NewAuditRepository(db)
-	householdRepo := repository.NewHouseholdRepository(db)
-	transferRepo  := repository.NewTransferRepository(db)
+	citizenRepo   := repository.NewCitizenRepository(db)
+	provinceRepo  := repository.NewProvinceRepository(db)
+	userRepo      := repository.NewUserRepository(db)
+	auditRepo     := repository.NewAuditRepository(db)
+	householdRepo  := repository.NewHouseholdRepository(db)
+	transferRepo   := repository.NewTransferRepository(db)
+	adminUnitRepo  := repository.NewAdminUnitRepository(db)
 
 	// ── Services ──────────────────────────────────────────────
 	// NewAuthService nhận Redis optional — nếu nil, Logout vẫn hoạt động
 	// nhưng không blacklist access token
-	citizenSvc  := citizensvc.New(citizenRepo, provinceRepo, auditRepo, enc)
-	authSvc     := service.NewAuthService(userRepo, jwtManager, redisClient)
-	auditSvc    := service.NewAuditService(auditRepo)
-	transferSvc := service.NewTransferService(db, transferRepo, householdRepo, citizenRepo, auditRepo)
+	citizenSvc    := citizensvc.New(citizenRepo, provinceRepo, auditRepo, enc)
+	authSvc       := service.NewAuthService(userRepo, jwtManager, redisClient)
+	auditSvc      := service.NewAuditService(auditRepo)
+	transferSvc   := service.NewTransferService(db, transferRepo, householdRepo, citizenRepo, auditRepo)
+	assignmentSvc := service.NewAssignmentService(adminUnitRepo, userRepo)
 
 	// ── Handlers ──────────────────────────────────────────────
-	citizenHandler  := handler.NewCitizenHandler(citizenSvc)
-	authHandler     := handler.NewAuthHandler(authSvc)
-	auditHandler    := handler.NewAuditHandler(auditSvc)
-	transferHandler := handler.NewTransferHandler(transferSvc)
+	citizenHandler    := handler.NewCitizenHandler(citizenSvc)
+	authHandler       := handler.NewAuthHandler(authSvc)
+	auditHandler      := handler.NewAuditHandler(auditSvc)
+	transferHandler   := handler.NewTransferHandler(transferSvc)
+	assignmentHandler := handler.NewAssignmentHandler(assignmentSvc)
 
 	if cfg.AppEnv == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -149,6 +152,13 @@ func main() {
 			admin.POST("/users/:id/reset-password", authHandler.ResetPassword)
 			admin.POST("/users/:id/lock",           authHandler.LockUser)
 			admin.POST("/users/:id/unlock",         authHandler.UnlockUser)
+
+			// ── User Assignments (điểm 1: tách scope khỏi users) ────
+			admin.POST("/assignments",                     assignmentHandler.AssignUser)
+			admin.POST("/assignments/:id/end",             assignmentHandler.EndAssignment)
+			admin.GET("/users/:id/assignments",            assignmentHandler.GetUserAssignments)
+			// GET /admin/units/:code/officers?at=2024-01-01
+			admin.GET("/units/:code/officers",             assignmentHandler.GetUnitOfficers)
 		}
 
 		// ── /citizens ─────────────────────────────────────────
@@ -290,6 +300,7 @@ func main() {
 	log.Printf("🚀 Population Service running on http://localhost%s", addr)
 	log.Printf("🔒 Rate limiting: login=10/15min | api=200/min | write=60/min")
 	log.Printf("👥 Roles: super_admin | national_manager | province_manager | district_manager | ward_officer | data_entry | auditor | analytics_viewer | citizen_self")
+	log.Printf("🏛️  Admin units tree + user_assignments + permissions enabled")
 
 	if err := r.Run(addr); err != nil {
 		log.Fatalf("Server failed: %v", err)

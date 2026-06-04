@@ -17,6 +17,8 @@ type HouseholdRepository interface {
 	AddMember(ctx context.Context, m *model.HouseholdMember) error
 	RemoveMember(ctx context.Context, householdID, citizenID string) error
 	GetMembers(ctx context.Context, householdID string) ([]*model.HouseholdMember, error)
+	// GetMemberHistory trả về toàn bộ lịch sử thành viên (kể cả đã rời)
+	GetMemberHistory(ctx context.Context, householdID string) ([]*model.HouseholdMember, error)
 	GetMemberHousehold(ctx context.Context, citizenID string) (*model.Household, error)
 }
 
@@ -110,34 +112,57 @@ func (r *householdRepo) List(ctx context.Context, filter model.ListHouseholdFilt
 }
 
 func (r *householdRepo) AddMember(ctx context.Context, m *model.HouseholdMember) error {
+	// Thêm thành viên mới — INSERT hoàn toàn mới (không UPDATE ON CONFLICT)
+	// vì mỗi lần thêm là một bản ghi lịch sử riêng.
+	// Constraint UNIQUE (household_id, citizen_id) WHERE is_active=TRUE đảm bảo
+	// không có hai bản ghi active cùng lúc cho cùng một cặp.
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO household_members (household_id, citizen_id, relationship)
-		 VALUES ($1, $2, $3)
-		 ON CONFLICT (household_id, citizen_id) DO UPDATE SET relationship=$3`,
+		`INSERT INTO household_members (id, household_id, citizen_id, relationship, is_active)
+		 VALUES (uuid_generate_v4(), $1, $2, $3, TRUE)`,
 		m.HouseholdID, m.CitizenID, m.Relationship)
 	return err
 }
 
+// RemoveMember đánh dấu thành viên đã rời hộ (soft-leave).
+// KHÔNG DELETE — giữ lại lịch sử là ai từng ở hộ nào.
 func (r *householdRepo) RemoveMember(ctx context.Context, householdID, citizenID string) error {
 	_, err := r.db.ExecContext(ctx,
-		`DELETE FROM household_members WHERE household_id=$1 AND citizen_id=$2`,
+		`UPDATE household_members
+		 SET is_active=FALSE, left_at=NOW()
+		 WHERE household_id=$1 AND citizen_id=$2 AND is_active=TRUE`,
 		householdID, citizenID)
 	return err
 }
 
+// GetMembers trả về thành viên HIỆN TẠI (is_active=TRUE)
 func (r *householdRepo) GetMembers(ctx context.Context, householdID string) ([]*model.HouseholdMember, error) {
 	var members []*model.HouseholdMember
 	err := r.db.SelectContext(ctx, &members,
-		`SELECT * FROM household_members WHERE household_id=$1 ORDER BY joined_at`, householdID)
+		`SELECT id, household_id, citizen_id, relationship, joined_at, left_at, is_active
+		 FROM household_members
+		 WHERE household_id=$1 AND is_active=TRUE
+		 ORDER BY joined_at`, householdID)
 	return members, err
 }
 
+// GetMemberHistory trả về TOÀN BỘ lịch sử thành viên của hộ (kể cả đã rời)
+func (r *householdRepo) GetMemberHistory(ctx context.Context, householdID string) ([]*model.HouseholdMember, error) {
+	var members []*model.HouseholdMember
+	err := r.db.SelectContext(ctx, &members,
+		`SELECT id, household_id, citizen_id, relationship, joined_at, left_at, is_active
+		 FROM household_members
+		 WHERE household_id=$1
+		 ORDER BY joined_at DESC`, householdID)
+	return members, err
+}
+
+// GetMemberHousehold trả về hộ hiện tại của công dân (chỉ thành viên active)
 func (r *householdRepo) GetMemberHousehold(ctx context.Context, citizenID string) (*model.Household, error) {
 	h := &model.Household{}
 	err := r.db.GetContext(ctx, h, `
 		SELECT h.* FROM households h
 		JOIN household_members hm ON hm.household_id = h.id
-		WHERE hm.citizen_id = $1 AND h.deleted_at IS NULL`, citizenID)
+		WHERE hm.citizen_id = $1 AND hm.is_active = TRUE AND h.deleted_at IS NULL`, citizenID)
 	if err != nil {
 		return nil, err
 	}

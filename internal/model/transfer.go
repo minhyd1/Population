@@ -32,34 +32,46 @@ const (
 	ApprovalDecisionRejected ApprovalDecision = "rejected"
 )
 
-// TransferRequest yêu cầu chuyển hộ khẩu
-// Mỗi yêu cầu lưu theo đơn vị hành chính, không theo cá nhân cán bộ
-// → Đổi cán bộ, nghỉ việc, reset tài khoản: workflow vẫn hoạt động
+// TransferRequest yêu cầu chuyển hộ khẩu.
+//
+// Thiết kế snapshot:
+//   - from_unit_code / to_unit_code được lưu ngay khi tạo request
+//   - Nếu household sau này đổi địa chỉ, lịch sử request vẫn bất biến
+//   - Workflow phê duyệt (transfer_approvals) cũng dùng unit_code, không dùng user_id
 type TransferRequest struct {
-	ID               string         `db:"id"`
-	CitizenID        string         `db:"citizen_id"`
-	FromHouseholdID  string         `db:"from_household_id"`
-	ToHouseholdID    string         `db:"to_household_id"`
-	ApprovalLevel    ApprovalLevel  `db:"approval_level"`
-	Status           TransferStatus `db:"status"`
-	Reason           string         `db:"reason"`
-	CreatedBy        string         `db:"created_by"`    // user_id người tạo
-	CreatedAt        time.Time      `db:"created_at"`
-	UpdatedAt        time.Time      `db:"updated_at"`
-	CompletedAt      *time.Time     `db:"completed_at"`
+	ID              string         `db:"id"`
+	CitizenID       string         `db:"citizen_id"`
+	FromHouseholdID string         `db:"from_household_id"`
+	ToHouseholdID   string         `db:"to_household_id"`
+	// Snapshot đơn vị tại thời điểm tạo — bất biến (điểm 3)
+	FromUnitCode    *string        `db:"from_unit_code"` // ward_code nơi đi
+	ToUnitCode      *string        `db:"to_unit_code"`   // ward_code nơi đến
+	ApprovalLevel   ApprovalLevel  `db:"approval_level"`
+	Status          TransferStatus `db:"status"`
+	Reason          string         `db:"reason"`
+	CreatedBy       string         `db:"created_by"`    // user_id người tạo
+	CreatedAt       time.Time      `db:"created_at"`
+	UpdatedAt       time.Time      `db:"updated_at"`
+	CompletedAt     *time.Time     `db:"completed_at"`
+	// Escalation
+	DeadlineAt      *time.Time     `db:"deadline_at"`  // 7 ngày sau khi tạo
+	EscalatedTo     *string        `db:"escalated_to"` // unit_code cấp trên sau escalate
+	// Optimistic locking
+	LockVersion     int            `db:"lock_version"`
 }
 
-// TransferApproval phiếu phê duyệt của một đơn vị hành chính
-// unit_code lưu theo đơn vị, không theo cá nhân → bền vững với thay đổi nhân sự
+// TransferApproval phiếu phê duyệt của một đơn vị hành chính.
+// unit_code lưu theo đơn vị, không theo cá nhân → bền vững với thay đổi nhân sự.
+// Kết hợp với user_assignments để biết ai phụ trách unit_code đó lúc duyệt.
 type TransferApproval struct {
-	ID          string           `db:"id"`
-	RequestID   string           `db:"request_id"`
-	UnitCode    string           `db:"unit_code"`    // mã đơn vị hành chính (ward/district/province)
-	UnitRole    string           `db:"unit_role"`    // "source" hoặc "destination"
-	Decision    ApprovalDecision `db:"decision"`
-	ApprovedBy  *string          `db:"approved_by"`  // user_id người duyệt (NULL nếu chưa duyệt)
-	RejectReason *string         `db:"reject_reason"`
-	ApprovedAt  *time.Time       `db:"approved_at"`
+	ID           string           `db:"id"`
+	RequestID    string           `db:"request_id"`
+	UnitCode     string           `db:"unit_code"`    // mã đơn vị hành chính
+	UnitRole     string           `db:"unit_role"`    // "source" hoặc "destination"
+	Decision     ApprovalDecision `db:"decision"`
+	ApprovedBy   *string          `db:"approved_by"`  // user_id người duyệt
+	RejectReason *string          `db:"reject_reason"`
+	ApprovedAt   *time.Time       `db:"approved_at"`
 }
 
 // ─── DTOs ───────────────────────────────────────────────────
@@ -96,6 +108,9 @@ type TransferRequestResponse struct {
 	CitizenName     string                     `json:"citizen_name,omitempty"`
 	FromHouseholdID string                     `json:"from_household_id"`
 	ToHouseholdID   string                     `json:"to_household_id"`
+	// Snapshot đơn vị — bất biến
+	FromUnitCode    *string                    `json:"from_unit_code,omitempty"`
+	ToUnitCode      *string                    `json:"to_unit_code,omitempty"`
 	ApprovalLevel   ApprovalLevel              `json:"approval_level"`
 	Status          TransferStatus             `json:"status"`
 	Reason          string                     `json:"reason"`
@@ -103,6 +118,8 @@ type TransferRequestResponse struct {
 	CreatedAt       time.Time                  `json:"created_at"`
 	UpdatedAt       time.Time                  `json:"updated_at"`
 	CompletedAt     *time.Time                 `json:"completed_at,omitempty"`
+	DeadlineAt      *time.Time                 `json:"deadline_at,omitempty"`
+	EscalatedTo     *string                    `json:"escalated_to,omitempty"`
 	Approvals       []TransferApprovalResponse `json:"approvals,omitempty"`
 }
 
