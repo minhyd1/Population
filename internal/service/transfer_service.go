@@ -45,7 +45,6 @@ type transferSvc struct {
 }
 
 func NewTransferService(
-	db *sqlx.DB,
 	transferRepo repository.TransferRepository,
 	householdRepo repository.HouseholdRepository,
 	citizenRepo repository.CitizenRepository,
@@ -305,7 +304,7 @@ func (s *transferSvc) ApproveTransfer(ctx context.Context, requestID string, req
 	}
 
 	// Vấn đề 6: Toàn bộ logic approve chạy trong transaction với SELECT FOR UPDATE
-	return s.transferRepo.WithTx(ctx, func(txRepo repository.TransferRepository) error {
+	return s.transferRepo.WithTx(ctx, func(tx *sqlx.Tx, txRepo repository.TransferRepository) error {
 		// SELECT FOR UPDATE — chặn Ward A và Ward B cùng trigger executeTransfer
 		treq, err := txRepo.GetRequestByIDForUpdate(ctx, requestID)
 		if err != nil {
@@ -340,8 +339,12 @@ func (s *transferSvc) ApproveTransfer(ctx context.Context, requestID string, req
 				if err != nil {
 					return err
 				}
-				// executeTransfer cần repo riêng vì đang trong transaction
-				return s.executeTransferInTx(ctx, txRepo, treq, fromHH)
+				// executeTransfer cần repo riêng vì đang trong transaction.
+				// txHousehold/txCitizen chạy trên CÙNG tx với txRepo — fix lỗi
+				// atomic: trước đây các thao tác này chạy ngoài transaction.
+				txHousehold := repository.NewHouseholdTxOps(tx)
+				txCitizen := repository.NewCitizenTxOps(tx)
+				return s.executeTransferInTx(ctx, txRepo, txHousehold, txCitizen, treq, fromHH)
 			}
 		} else if req.Decision == model.ApprovalDecisionRejected {
 			return txRepo.UpdateRequestStatus(ctx, requestID, model.TransferStatusRejected)
@@ -479,16 +482,27 @@ func (s *transferSvc) determineEscalationTarget(ctx context.Context, treq *model
 
 // executeTransfer — gọi từ bên ngoài transaction (ForceApprove, ApprovalLevelNone)
 func (s *transferSvc) executeTransfer(ctx context.Context, treq *model.TransferRequest, fromHH *model.Household) error {
-	return s.transferRepo.WithTx(ctx, func(txRepo repository.TransferRepository) error {
-		return s.executeTransferInTx(ctx, txRepo, treq, fromHH)
+	return s.transferRepo.WithTx(ctx, func(tx *sqlx.Tx, txRepo repository.TransferRepository) error {
+		txHousehold := repository.NewHouseholdTxOps(tx)
+		txCitizen := repository.NewCitizenTxOps(tx)
+		return s.executeTransferInTx(ctx, txRepo, txHousehold, txCitizen, treq, fromHH)
 	})
 }
 
 // executeTransferInTx — gọi từ bên trong transaction đang có (ApproveTransfer)
-// Tách ra để tránh nested transaction
+// Tách ra để tránh nested transaction.
+//
+// FIX (atomicity bug): trước đây hàm này gọi thẳng s.householdRepo.AddMember/
+// RemoveMember và s.citizenRepo.UpdateResidence — các repo này KHÔNG nằm
+// trong transaction của txRepo, nên nếu bước cuối (CompleteRequest) lỗi,
+// household/citizen đã bị đổi mà transfer_request vẫn "pending" — dữ liệu
+// lệch nhau vĩnh viễn. Giờ txHousehold/txCitizen chạy trên cùng *sqlx.Tx
+// với txRepo, nên toàn bộ 5 bước dưới đây commit/rollback như một khối.
 func (s *transferSvc) executeTransferInTx(
 	ctx context.Context,
 	txRepo repository.TransferRepository,
+	txHousehold repository.TxHouseholdOps,
+	txCitizen repository.TxCitizenOps,
 	treq *model.TransferRequest,
 	fromHH *model.Household,
 ) error {
@@ -510,13 +524,13 @@ func (s *transferSvc) executeTransferInTx(
 		return fmt.Errorf("residence history: %w", err)
 	}
 
-	// 2. Xóa khỏi hộ cũ
-	if err := s.householdRepo.RemoveMember(ctx, treq.FromHouseholdID, treq.CitizenID); err != nil {
+	// 2. Xóa khỏi hộ cũ (trong transaction)
+	if err := txHousehold.RemoveMember(ctx, treq.FromHouseholdID, treq.CitizenID); err != nil {
 		return fmt.Errorf("remove member: %w", err)
 	}
 
-	// 3. Thêm vào hộ mới
-	if err := s.householdRepo.AddMember(ctx, &model.HouseholdMember{
+	// 3. Thêm vào hộ mới (trong transaction)
+	if err := txHousehold.AddMember(ctx, &model.HouseholdMember{
 		HouseholdID:  treq.ToHouseholdID,
 		CitizenID:    treq.CitizenID,
 		Relationship: "thành viên",
@@ -524,8 +538,8 @@ func (s *transferSvc) executeTransferInTx(
 		return fmt.Errorf("add member: %w", err)
 	}
 
-	// 4. Cập nhật địa chỉ công dân theo hộ mới
-	if err := s.citizenRepo.UpdateResidence(ctx, treq.CitizenID,
+	// 4. Cập nhật địa chỉ công dân theo hộ mới (trong transaction)
+	if err := txCitizen.UpdateResidence(ctx, treq.CitizenID,
 		toHH.ProvinceCode, toHH.DistrictCode, toHH.WardCode); err != nil {
 		return fmt.Errorf("update citizen residence: %w", err)
 	}
@@ -549,6 +563,11 @@ func (s *transferSvc) executeTransferInTx(
 		ChangedByRole: "transfer_workflow",
 		ChangedAt:     now,
 	}
+	// Audit log cố ý nằm NGOÀI transaction chính (best-effort): AuditRepository
+	// hiện chưa có bản chạy chung *sqlx.Tx, và một audit log ghi trễ/thiếu không
+	// nên làm rollback cả nghiệp vụ chuyển hộ khẩu đã hoàn tất. Đây là đánh đổi
+	// có chủ đích, không phải sót — nếu cần audit log atomic 100%, cần thêm
+	// TxAuditOps tương tự TxHouseholdOps/TxCitizenOps ở trên.
 	_ = s.auditRepo.InsertWithVisibility(ctx, auditLog, visibilityUnits)
 
 	_ = fromHH // used for reference

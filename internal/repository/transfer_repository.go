@@ -35,8 +35,12 @@ type TransferRepository interface {
 	CreateResidenceHistory(ctx context.Context, h *model.ResidenceHistory) error
 	GetResidenceHistory(ctx context.Context, citizenID string) ([]*model.ResidenceHistory, error)
 
-	// Transaction support
-	WithTx(ctx context.Context, fn func(txRepo TransferRepository) error) error
+	// Transaction support.
+	// fn nhận cả *sqlx.Tx lẫn txRepo: txRepo dùng cho các thao tác transfer_requests/
+	// transfer_approvals/residence_history, còn *sqlx.Tx dùng để build thêm
+	// TxHouseholdOps/TxCitizenOps (xem household_repository.go, citizen_repository.go)
+	// khi cần thao tác trên household/citizen TRONG CÙNG transaction này.
+	WithTx(ctx context.Context, fn func(tx *sqlx.Tx, txRepo TransferRepository) error) error
 }
 
 type transferRepo struct{ db *sqlx.DB }
@@ -260,13 +264,13 @@ func (r *transferRepo) GetResidenceHistory(ctx context.Context, citizenID string
 // ─── Transaction ────────────────────────────────────────────
 
 // WithTx thực hiện function trong một database transaction
-func (r *transferRepo) WithTx(ctx context.Context, fn func(txRepo TransferRepository) error) error {
+func (r *transferRepo) WithTx(ctx context.Context, fn func(tx *sqlx.Tx, txRepo TransferRepository) error) error {
 	tx, err := r.db.BeginTxx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	txDB := &txTransferRepo{tx: tx}
-	err = fn(txDB)
+	err = fn(tx, txDB)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -404,7 +408,7 @@ func (r *txTransferRepo) GetResidenceHistory(ctx context.Context, citizenID stri
 	return rows, err
 }
 
-func (r *txTransferRepo) WithTx(ctx context.Context, fn func(txRepo TransferRepository) error) error {
+func (r *txTransferRepo) WithTx(ctx context.Context, fn func(tx *sqlx.Tx, txRepo TransferRepository) error) error {
 	return fmt.Errorf("nested transactions not supported")
 }
 

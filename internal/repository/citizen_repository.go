@@ -282,3 +282,30 @@ func (r *citizenRepo) UpdateResidence(ctx context.Context, citizenID, provinceCo
 		provinceCode, districtCode, wardCode, citizenID)
 	return err
 }
+
+// ─── TxCitizenOps (dùng chung transaction với transfer workflow) ─────────────
+//
+// Cùng lý do với TxHouseholdOps ở household_repository.go: UpdateResidence
+// phải chạy chung transaction với việc tạo residence history và hoàn tất
+// transfer request, để không bao giờ có trạng thái "công dân đã đổi hộ khẩu
+// nhưng địa chỉ cư trú chưa cập nhật" (hoặc ngược lại) do lỗi giữa chừng.
+type TxCitizenOps interface {
+	UpdateResidence(ctx context.Context, citizenID, provinceCode, districtCode, wardCode string) error
+}
+
+type citizenTxOps struct{ tx *sqlx.Tx }
+
+// NewCitizenTxOps bọc một *sqlx.Tx đã có sẵn để UpdateResidence chạy chung
+// transaction đó thay vì tự mở transaction/connection riêng.
+func NewCitizenTxOps(tx *sqlx.Tx) TxCitizenOps {
+	return &citizenTxOps{tx: tx}
+}
+
+func (o *citizenTxOps) UpdateResidence(ctx context.Context, citizenID, provinceCode, districtCode, wardCode string) error {
+	_, err := o.tx.ExecContext(ctx, `
+		UPDATE citizens
+		SET province_code=$1, district_code=$2, ward_code=$3, updated_at=NOW()
+		WHERE id=$4 AND deleted_at IS NULL`,
+		provinceCode, districtCode, wardCode, citizenID)
+	return err
+}

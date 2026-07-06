@@ -168,3 +168,44 @@ func (r *householdRepo) GetMemberHousehold(ctx context.Context, citizenID string
 	}
 	return h, nil
 }
+
+// ─── TxHouseholdOps (dùng chung transaction với transfer workflow) ───────────
+//
+// Vấn đề đã fix: trước đây transferSvc.executeTransferInTx gọi thẳng
+// s.householdRepo.AddMember/RemoveMember (không transaction), trong khi
+// CreateResidenceHistory/CompleteRequest lại chạy trong transaction riêng
+// của TransferRepository. Nếu một bước ở giữa lỗi, dữ liệu household và
+// transfer_requests có thể bị lệch nhau vĩnh viễn (mất tính atomic).
+//
+// TxHouseholdOps expose đúng 2 method cần thiết cho transfer workflow,
+// chạy trên CÙNG MỘT *sqlx.Tx với TransferRepository, để toàn bộ thao tác
+// chuyển hộ khẩu commit/rollback như một khối duy nhất.
+type TxHouseholdOps interface {
+	AddMember(ctx context.Context, m *model.HouseholdMember) error
+	RemoveMember(ctx context.Context, householdID, citizenID string) error
+}
+
+type householdTxOps struct{ tx *sqlx.Tx }
+
+// NewHouseholdTxOps bọc một *sqlx.Tx đã có sẵn (ví dụ từ TransferRepository.WithTx)
+// để AddMember/RemoveMember chạy chung transaction đó thay vì mở transaction riêng.
+func NewHouseholdTxOps(tx *sqlx.Tx) TxHouseholdOps {
+	return &householdTxOps{tx: tx}
+}
+
+func (o *householdTxOps) AddMember(ctx context.Context, m *model.HouseholdMember) error {
+	_, err := o.tx.ExecContext(ctx,
+		`INSERT INTO household_members (id, household_id, citizen_id, relationship, is_active)
+		 VALUES (uuid_generate_v4(), $1, $2, $3, TRUE)`,
+		m.HouseholdID, m.CitizenID, m.Relationship)
+	return err
+}
+
+func (o *householdTxOps) RemoveMember(ctx context.Context, householdID, citizenID string) error {
+	_, err := o.tx.ExecContext(ctx,
+		`UPDATE household_members
+		 SET is_active=FALSE, left_at=NOW()
+		 WHERE household_id=$1 AND citizen_id=$2 AND is_active=TRUE`,
+		householdID, citizenID)
+	return err
+}

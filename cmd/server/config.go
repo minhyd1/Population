@@ -57,11 +57,52 @@ func LoadConfig() *Config {
 		RedisEnabled:     getEnv("REDIS_ENABLED", "true") != "false",
 	}
 
-	if cfg.EncryptionKey == "" {
-		log.Fatal("ENCRYPTION_KEY environment variable is required")
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
 	}
 
 	return cfg
+}
+
+// Validate kiểm tra các ràng buộc bắt buộc và cảnh báo/chặn cấu hình không an
+// toàn. Trước đây chỉ có ENCRYPTION_KEY được kiểm tra; JWT secret có thể âm
+// thầm chạy với giá trị mặc định "your-access-secret-key" ở production mà
+// không ai biết cho tới khi bị khai thác.
+func (c *Config) Validate() error {
+	var missing []string
+
+	if c.EncryptionKey == "" {
+		missing = append(missing, "ENCRYPTION_KEY")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("thiếu biến môi trường bắt buộc: %v", missing)
+	}
+
+	insecureDefaults := map[string]string{
+		"JWT_ACCESS_SECRET":  "your-access-secret-key",
+		"JWT_REFRESH_SECRET": "your-refresh-secret-key",
+	}
+	current := map[string]string{
+		"JWT_ACCESS_SECRET":  c.JWTAccessSecret,
+		"JWT_REFRESH_SECRET": c.JWTRefreshSecret,
+	}
+	for key, defaultVal := range insecureDefaults {
+		if current[key] == defaultVal {
+			if c.AppEnv == "production" {
+				return fmt.Errorf("%s vẫn đang dùng giá trị mặc định không an toàn — bắt buộc phải set khi APP_ENV=production", key)
+			}
+			log.Printf("⚠️  %s đang dùng giá trị mặc định — CHỈ chấp nhận ở development, không được dùng ở production", key)
+		}
+	}
+
+	if len(c.JWTAccessSecret) < 16 {
+		return fmt.Errorf("JWT_ACCESS_SECRET quá ngắn (%d ký tự) — cần tối thiểu 16 ký tự", len(c.JWTAccessSecret))
+	}
+	if len(c.JWTRefreshSecret) < 16 {
+		return fmt.Errorf("JWT_REFRESH_SECRET quá ngắn (%d ký tự) — cần tối thiểu 16 ký tự", len(c.JWTRefreshSecret))
+	}
+
+	return nil
 }
 
 func ConnectDB(cfg *Config) *sqlx.DB {

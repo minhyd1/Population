@@ -1,0 +1,36 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - gosimple
+    - bodyclose
+    - gosec
+    - misspell
+    - unconvert
+
+linters-settings:
+  errcheck:
+    # Nhiều nơi trong code cố ý bỏ qua lỗi decrypt tốt nhất (best-effort audit
+    # log, decrypt cho response) bằng `_, _ = ...`. errcheck vẫn báo các lỗi
+    # KHÔNG được gán vào `_` một cách tường minh, nên vẫn bắt được lỗi thật.
+    check-blank: false
+  gosec:
+    excludes:
+      - G404 # math/rand dùng cho việc không nhạy cảm bảo mật (nếu có) — rà lại nếu linter báo
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+        - gosec
+  max-issues-per-linter: 0
+  max-same-issues: 0

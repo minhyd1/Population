@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # 🏛️ Population Service
 
 API quản lý dân số Việt Nam viết bằng Golang, PostgreSQL, theo chuẩn microservice.
@@ -53,44 +52,32 @@ population-service/
 | `email` | Địa chỉ email |
 | `permanent_address` | Địa chỉ thường trú |
 
-### Flow mã hóa:
+### Flow mã hóa (đã cập nhật cho đúng code hiện tại):
 ```
-Client gửi plaintext
-    → Service encrypt → DB lưu ciphertext
-    → Service trả về ciphertext (encrypted)
-    → Frontend decrypt bằng shared key
-```
-
-### Frontend decrypt (JavaScript):
-```javascript
-async function decryptField(base64Ciphertext, base64Key) {
-  const keyBytes = Uint8Array.from(atob(base64Key), c => c.charCodeAt(0));
-  const cipherBytes = Uint8Array.from(atob(base64Ciphertext), c => c.charCodeAt(0));
-  const iv = cipherBytes.slice(0, 12);          // 12 bytes nonce
-  const data = cipherBytes.slice(12);            // ciphertext + auth tag
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw', keyBytes, 'AES-GCM', false, ['decrypt']
-  );
-  const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv }, cryptoKey, data
-  );
-  return new TextDecoder().decode(decrypted);
-}
-
-// Sử dụng:
-const encryptedNationalID = citizen.national_id; // từ API response
-const plainNationalID = await decryptField(encryptedNationalID, YOUR_BASE64_KEY);
+Client gửi plaintext (qua HTTPS)
+    → Service encrypt (AES-256-GCM) → DB lưu ciphertext
+    → Khi đọc: Service decrypt tại server (internal/service/citizen/helpers.go)
+    → API trả về plaintext cho Frontend (qua HTTPS)
 ```
 
-### Response luôn có `encrypted_fields`:
+> ⚠️ **Lưu ý sửa đổi**: Bản trước của README mô tả sai kiến trúc — ghi rằng
+> "Frontend decrypt bằng shared key", nghĩa là client phải giữ AES key. Đây
+> **không** phải hành vi thật của code. Encryption key (`ENCRYPTION_KEY`)
+> chỉ tồn tại phía server (biến môi trường), không bao giờ được gửi xuống
+> client. Client luôn nhận dữ liệu ở dạng plaintext qua kênh HTTPS đã mã hóa
+> ở tầng giao vận — đúng mô hình bảo mật chuẩn (server giữ khóa, client chỉ
+> tin tưởng kênh truyền). Mục đích mã hóa AES-256-GCM ở đây là bảo vệ dữ liệu
+> **tại rest** (khi lưu trong PostgreSQL), không phải bảo vệ trên đường truyền.
+
+### Response trả về plaintext, kèm `encrypted_fields` để client biết trường nào từng được mã hóa tại DB:
 ```json
 {
   "id": "uuid...",
   "full_name": "Nguyễn Văn An",
-  "national_id": "base64-encrypted-ciphertext",
-  "phone_number": "base64-encrypted-ciphertext",
-  "email": "base64-encrypted-ciphertext",
-  "permanent_address": "base64-encrypted-ciphertext",
+  "national_id": "001234567890",
+  "phone_number": "0912345678",
+  "email": "an.nguyen@example.com",
+  "permanent_address": "123 Đường ABC, Phường X, Quận Y",
   "encrypted_fields": ["national_id", "phone_number", "email", "permanent_address"]
 }
 ```
@@ -195,6 +182,3 @@ go test ./pkg/crypto/... -v
 - **Pagination**: Mọi endpoint danh sách đều có pagination
 - **Encryption**: AES-256-GCM, IV ngẫu nhiên mỗi lần → cùng plaintext cho ciphertext khác nhau
 - **Key rotation**: Thêm `key_version` vào header `X-Encryption-Key-Version` để support rotate key
-=======
-# Population
->>>>>>> a2ae5c46ecb7eb1b29e98ad58b9d2db1b2ef5b98
