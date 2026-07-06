@@ -13,10 +13,8 @@ import (
 const ClaimsKey = "jwt_claims"
 
 // JWTAuth xác thực access token.
-// Nếu redisClient != nil, còn kiểm tra thêm token có bị blacklist không
-// (xảy ra khi user logout trước khi token hết hạn).
+// Nếu redisClient != nil, còn kiểm tra thêm token có bị blacklist không.
 func JWTAuth(jwtManager *jwtpkg.Manager, redisClient ...*redispkg.Client) gin.HandlerFunc {
-	// redisClient là variadic để không bắt buộc — backward compatible
 	var rdb *redispkg.Client
 	if len(redisClient) > 0 {
 		rdb = redisClient[0]
@@ -50,8 +48,7 @@ func JWTAuth(jwtManager *jwtpkg.Manager, redisClient ...*redispkg.Client) gin.Ha
 			return
 		}
 
-		// Kiểm tra token có bị blacklist không (chỉ khi Redis available)
-		// TokenID = JTI claim — định danh duy nhất của token này
+		// Kiểm tra token có bị blacklist không
 		if rdb != nil && claims.ID != "" {
 			blacklisted, err := rdb.IsBlacklisted(c.Request.Context(), claims.ID)
 			if err == nil && blacklisted {
@@ -63,17 +60,21 @@ func JWTAuth(jwtManager *jwtpkg.Manager, redisClient ...*redispkg.Client) gin.Ha
 			}
 		}
 
-		// Lưu claims vào gin context để handler và middleware sau dùng
+		// Lưu claims vào gin context
 		c.Set(ClaimsKey, claims)
 		c.Set(string(ContextKeyUserID), claims.UserID)
 		c.Set(string(ContextKeyUsername), claims.Username)
 		c.Set(string(ContextKeyUserRole), string(claims.Role))
 
 		// Inject vào request context để service layer lấy qua ctx.Value()
+		// Vấn đề 3 & 2: truyền đủ ward/district/province để enforce scope
 		reqCtx := c.Request.Context()
 		reqCtx = context.WithValue(reqCtx, ContextKeyUserID, claims.UserID)
 		reqCtx = context.WithValue(reqCtx, ContextKeyUsername, claims.Username)
 		reqCtx = context.WithValue(reqCtx, ContextKeyUserRole, string(claims.Role))
+		reqCtx = context.WithValue(reqCtx, ContextKeyWardCode, claims.WardCode)
+		reqCtx = context.WithValue(reqCtx, ContextKeyDistrictCode, claims.DistrictCode)
+		reqCtx = context.WithValue(reqCtx, ContextKeyProvinceCode, claims.ProvinceCode)
 		c.Request = c.Request.WithContext(reqCtx)
 
 		c.Next()

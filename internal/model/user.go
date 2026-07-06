@@ -6,21 +6,27 @@ import (
 	jwtpkg "population-service/pkg/jwt"
 )
 
-// User ánh xạ với bảng users trong PostgreSQL
+// User ánh xạ với bảng users trong PostgreSQL.
+//
+// NOTE: ProvinceCode, DistrictCode, WardCode vẫn tồn tại trên bảng
+// để backward-compatible với seed cũ và JWT claims hiện tại.
+// Nhưng nguồn sự thật chính thức là bảng user_assignments.
+// Khi cần "user đang phụ trách đâu", luôn query user_assignments WHERE end_date IS NULL.
 type User struct {
 	ID           string      `db:"id"`
 	Username     string      `db:"username"`
 	PasswordHash string      `db:"password_hash"`
 	Role         jwtpkg.Role `db:"role"`
-	// Địa bàn phụ trách — NULL nếu không bị giới hạn địa bàn (super_admin, national_manager)
-	ProvinceCode *string     `db:"province_code"`
-	DistrictCode *string     `db:"district_code"`
-	WardCode     *string     `db:"ward_code"`
+	// Deprecated: dùng user_assignments thay thế.
+	// Giữ lại để JWT claims vẫn hoạt động với code cũ trong thời gian chuyển đổi.
+	ProvinceCode *string `db:"province_code"`
+	DistrictCode *string `db:"district_code"`
+	WardCode     *string `db:"ward_code"`
 	// Liên kết với hồ sơ dân cư — chỉ dùng cho role citizen_self
-	CitizenID    *string     `db:"citizen_id"`
-	IsActive     bool        `db:"is_active"`
-	CreatedAt    time.Time   `db:"created_at"`
-	UpdatedAt    time.Time   `db:"updated_at"`
+	CitizenID *string   `db:"citizen_id"`
+	IsActive  bool      `db:"is_active"`
+	CreatedAt time.Time `db:"created_at"`
+	UpdatedAt time.Time `db:"updated_at"`
 }
 
 // RefreshToken lưu hash của refresh token để có thể revoke
@@ -44,6 +50,7 @@ type LoginRequest struct {
 
 // RegisterRequest — chỉ super_admin mới được gọi endpoint register để tạo tài khoản mới.
 // province_code/district_code/ward_code bắt buộc tùy theo role.
+// Sau khi tạo user, nên gọi thêm POST /admin/assignments để tạo user_assignment chính thức.
 type RegisterRequest struct {
 	Username     string      `json:"username"      binding:"required,min=3,max=50"`
 	Password     string      `json:"password"      binding:"required,min=6"`
@@ -52,6 +59,8 @@ type RegisterRequest struct {
 	DistrictCode *string     `json:"district_code"` // bắt buộc với district_manager
 	WardCode     *string     `json:"ward_code"`     // bắt buộc với ward_officer
 	CitizenID    *string     `json:"citizen_id"`    // bắt buộc với citizen_self
+	// UnitCode nếu cung cấp sẽ tự động tạo user_assignment luôn
+	UnitCode *string `json:"unit_code"`
 }
 
 type TokenResponse struct {
@@ -74,6 +83,8 @@ type MeResponse struct {
 	DistrictCode *string     `json:"district_code,omitempty"`
 	WardCode     *string     `json:"ward_code,omitempty"`
 	CitizenID    *string     `json:"citizen_id,omitempty"`
+	// ActiveUnits: danh sách đơn vị đang phụ trách (từ user_assignments)
+	ActiveUnits []string `json:"active_units,omitempty"`
 }
 
 // UpdateUserRequest dùng cho super_admin quản lý tài khoản

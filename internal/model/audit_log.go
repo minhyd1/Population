@@ -16,15 +16,15 @@ const (
 
 // AuditLog là bản ghi lịch sử thay đổi thông tin công dân
 type AuditLog struct {
-	ID             string          `db:"id"`
-	CitizenID      string          `db:"citizen_id"`
-	Action         AuditAction     `db:"action"`
-	ChangedBy      string          `db:"changed_by"`      // user_id
-	ChangedByName  string          `db:"changed_by_name"` // username
-	ChangedByRole  string          `db:"changed_by_role"`
-	OldValues      json.RawMessage `db:"old_values"`  // NULL với create
-	NewValues      json.RawMessage `db:"new_values"`  // NULL với delete
-	ChangedAt      time.Time       `db:"changed_at"`
+	ID            string          `db:"id"`
+	CitizenID     string          `db:"citizen_id"`
+	Action        AuditAction     `db:"action"`
+	ChangedBy     string          `db:"changed_by"`      // user_id
+	ChangedByName string          `db:"changed_by_name"` // username
+	ChangedByRole string          `db:"changed_by_role"`
+	OldValues     json.RawMessage `db:"old_values"`  // NULL với create
+	NewValues     json.RawMessage `db:"new_values"`  // NULL với delete
+	ChangedAt     time.Time       `db:"changed_at"`
 }
 
 // AuditCitizenSnapshot là snapshot các field của Citizen để lưu vào JSONB.
@@ -51,27 +51,30 @@ type AuditCitizenSnapshot struct {
 // ──────────────────────────────────────────────────────────
 
 // ListAuditLogFilter — tham số lọc khi tra cứu audit log
+// Vấn đề 2: thêm UnitCode để filter theo visibility
 type ListAuditLogFilter struct {
 	CitizenID string      `form:"citizen_id"`
 	Action    AuditAction `form:"action"`
 	ChangedBy string      `form:"changed_by"` // lọc theo user_id
 	From      string      `form:"from"`        // "2006-01-02" hoặc "2006-01-02T15:04:05Z"
 	To        string      `form:"to"`
+	// Vấn đề 2: Audit Visibility — chỉ trả về log mà unit_code này được phép xem
+	UnitCode  string      `form:"-"` // được inject từ JWT, không từ query string
 	Page      int         `form:"page,default=1"`
 	PageSize  int         `form:"page_size,default=20"`
 }
 
 // AuditLogResponse — DTO trả về cho client
 type AuditLogResponse struct {
-	ID             string          `json:"id"`
-	CitizenID      string          `json:"citizen_id"`
-	Action         AuditAction     `json:"action"`
-	ChangedBy      string          `json:"changed_by"`
-	ChangedByName  string          `json:"changed_by_name"`
-	ChangedByRole  string          `json:"changed_by_role"`
-	OldValues      json.RawMessage `json:"old_values"`
-	NewValues      json.RawMessage `json:"new_values"`
-	ChangedAt      time.Time       `json:"changed_at"`
+	ID            string          `json:"id"`
+	CitizenID     string          `json:"citizen_id"`
+	Action        AuditAction     `json:"action"`
+	ChangedBy     string          `json:"changed_by"`
+	ChangedByName string          `json:"changed_by_name"`
+	ChangedByRole string          `json:"changed_by_role"`
+	OldValues     json.RawMessage `json:"old_values"`
+	NewValues     json.RawMessage `json:"new_values"`
+	ChangedAt     time.Time       `json:"changed_at"`
 }
 
 // AuditLogListResponse — paginated list
