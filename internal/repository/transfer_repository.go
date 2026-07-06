@@ -415,7 +415,7 @@ func (r *txTransferRepo) WithTx(ctx context.Context, fn func(tx *sqlx.Tx, txRepo
 // Ensure txTransferRepo satisfies interface at compile time
 var _ TransferRepository = (*txTransferRepo)(nil)
 
-// Helper: kiểm tra error là "no rows" không
-func isNoRows(err error) bool {
-	return err != nil && err.Error() == sql.ErrNoRows.Error()
-}
+// // Helper: kiểm tra error là "no rows" không
+// func isNoRows(err error) bool {
+// 	return err != nil && err.Error() == sql.ErrNoRows.Error()
+// }
